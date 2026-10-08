@@ -34,7 +34,7 @@ jobs:
           fetch-depth: 0
 
       # ----------------------------------------------------
-      # 1. EXTRACT ZIP ARCHIVES
+      # 1. EXTRACT ZIP (HANDLES SPACES IN ZIP NAME)
       # ----------------------------------------------------
       - name: Auto-Extract Zip Files
         run: |
@@ -76,7 +76,7 @@ jobs:
           echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> $GITHUB_ENV
 
       # ----------------------------------------------------
-      # 3. UNIVERSAL PBXPROJ SYNTAX REPAIR (Lines 1 to End)
+      # 3. REPAIR SYNTAX IN PROJECT.PBXPROJ
       # ----------------------------------------------------
       - name: Repair and Validate Xcode Project Syntax
         run: |
@@ -95,7 +95,6 @@ jobs:
           with open(pbx_path, 'r', encoding='utf-8', errors='ignore') as f:
               lines = f.readlines()
 
-          # Pattern matching any `key = unquoted value;` where value contains spaces or parens
           pattern = r'(\b\w+\s*=\s*)([^\";{}\n]+?)(\s*(?:/\*.*?\*/\s*)?;)'
 
           def quote_unquoted(m):
@@ -107,7 +106,6 @@ jobs:
                   comment = ' ' + v[idx:]
                   v = v[:idx].strip()
                   suffix = comment + suffix
-              # Wrap in quotes if it has spaces or parentheses and is unquoted
               if (' ' in v or '(' in v or ')' in v) and not (v.startswith('"') and v.endswith('"')):
                   return f'{prefix}"{v}"{suffix}'
               return m.group(0)
@@ -117,21 +115,16 @@ jobs:
           for i, line in enumerate(lines):
               s = line.strip()
 
-              # 1. Remove git conflict markers
               if s.startswith(('<<<<<<<', '=======', '>>>>>>>')):
-                  print(f"Removing merge conflict marker at line {i+1}")
                   modified = True
                   continue
 
-              # 2. Fix all unquoted names/paths (FOUGO File (1).3105 on line 93, 353, etc.)
               fixed_line = re.sub(pattern, quote_unquoted, line)
               if fixed_line != line:
-                  print(f"Repaired unquoted name on line {i+1}: {fixed_line.strip()}")
                   line = fixed_line
                   s = line.strip()
                   modified = True
 
-              # 3. Fix missing semicolon on assignments
               if '=' in s and not s.startswith(('//', '/*')) and not s.endswith((';', '{', '(', ',')):
                   indent = line[:len(line) - len(line.lstrip())]
                   comment = ''
@@ -141,14 +134,11 @@ jobs:
                       comment = ' ' + s[c_idx:]
                       val_part = s[:c_idx].strip()
                   line = f"{indent}{val_part};{comment}\n"
-                  print(f"Added missing semicolon on line {i+1}")
                   modified = True
 
-              # 4. Fix missing semicolon on closing brace
               elif s == '}' and i < len(lines) - 2:
                   indent = line[:len(line) - len(line.lstrip())]
                   line = f"{indent}}};\n"
-                  print(f"Fixed closing brace on line {i+1}")
                   modified = True
 
               new_lines.append(line)
@@ -156,16 +146,44 @@ jobs:
           if modified:
               with open(pbx_path, 'w', encoding='utf-8') as f:
                   f.writelines(new_lines)
-              print("Successfully repaired all project.pbxproj syntax errors!")
-          else:
-              print("No syntax anomalies found.")
+              print("Successfully auto-repaired project.pbxproj syntax!")
           EOF
 
-          echo "Testing syntax with macOS plutil..."
           plutil -lint "$PBX_FILE" || true
 
       # ----------------------------------------------------
-      # 4. SELECT XCODE & VERIFY SCHEME
+      # 4. SYNC PATCH RESOURCE FILES (FIXES EXIT CODE 65)
+      # ----------------------------------------------------
+      - name: Sync Patch Resource Files
+        run: |
+          echo "Syncing patch resource files in Patches folders..."
+          python3 - << 'EOF'
+          import os, shutil
+
+          for root, dirs, files in os.walk('.'):
+              if os.path.basename(root) == 'Patches':
+                  print(f"Checking Patches folder: {root}")
+                  for f in list(files):
+                      # Create 'FOUGO EXTERNAL File (...)' from 'FOUGO File (...)'
+                      if 'FOUGO File' in f and 'EXTERNAL' not in f:
+                          ext_name = f.replace('FOUGO File', 'FOUGO EXTERNAL File')
+                          src = os.path.join(root, f)
+                          dst = os.path.join(root, ext_name)
+                          if not os.path.exists(dst):
+                              shutil.copyfile(src, dst)
+                              print(f"Created: {ext_name}")
+                      # Create 'FOUGO File (...)' from 'FOUGO EXTERNAL File (...)'
+                      elif 'FOUGO EXTERNAL File' in f:
+                          base_name = f.replace('FOUGO EXTERNAL File', 'FOUGO File')
+                          src = os.path.join(root, f)
+                          dst = os.path.join(root, base_name)
+                          if not os.path.exists(dst):
+                              shutil.copyfile(src, dst)
+                              print(f"Created: {base_name}")
+          EOF
+
+      # ----------------------------------------------------
+      # 5. SELECT XCODE & VERIFY SCHEME
       # ----------------------------------------------------
       - name: Select Xcode 15.4
         run: |
@@ -181,7 +199,7 @@ jobs:
           xcodebuild -list -project "$PROJECT_PATH"
 
       # ----------------------------------------------------
-      # 5. COMPILE APPLICATION
+      # 6. COMPILE APPLICATION
       # ----------------------------------------------------
       - name: Compile Application with xcodebuild
         run: |
@@ -201,7 +219,7 @@ jobs:
             AD_HOC_CODE_SIGNING_ALLOWED=YES
 
       # ----------------------------------------------------
-      # 6. PACKAGE INTO IPA & UPLOAD
+      # 7. PACKAGE INTO IPA & UPLOAD
       # ----------------------------------------------------
       - name: Package .app into .ipa
         run: |
