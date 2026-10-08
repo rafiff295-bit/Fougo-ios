@@ -34,7 +34,7 @@ jobs:
           fetch-depth: 0
 
       # ----------------------------------------------------
-      # 1. SAFELY UNZIP (HANDLES SPACES IN ZIP NAME)
+      # 1. EXTRACT ZIP ARCHIVES
       # ----------------------------------------------------
       - name: Auto-Extract Zip Files
         run: |
@@ -76,58 +76,63 @@ jobs:
           echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> $GITHUB_ENV
 
       # ----------------------------------------------------
-      # 3. AUTO-REPAIR LINE 353 IN PROJECT.PBXPROJ
+      # 3. UNIVERSAL PBXPROJ SYNTAX REPAIR (Lines 1 to End)
       # ----------------------------------------------------
       - name: Repair and Validate Xcode Project Syntax
         run: |
           PBX_FILE="$PROJECT_PATH/project.pbxproj"
-          echo "Inspecting $PBX_FILE for syntax errors..."
+          echo "Inspecting $PBX_FILE..."
 
           if [ ! -f "$PBX_FILE" ]; then
             echo "::error::$PBX_FILE not found!"
             exit 1
           fi
 
-          echo "=== Lines 340 to 365 of project.pbxproj ==="
-          sed -n '340,365p' "$PBX_FILE" || true
-          echo "============================================"
-
           python3 - << 'EOF' "$PBX_FILE"
-          import sys
+          import sys, re
 
           pbx_path = sys.argv[1]
           with open(pbx_path, 'r', encoding='utf-8', errors='ignore') as f:
               lines = f.readlines()
 
+          # Pattern matching any `key = unquoted value;` where value contains spaces or parens
+          pattern = r'(\b\w+\s*=\s*)([^\";{}\n]+?)(\s*(?:/\*.*?\*/\s*)?;)'
+
+          def quote_unquoted(m):
+              prefix = m.group(1)
+              v = m.group(2).strip()
+              suffix = m.group(3)
+              if '/*' in v and v.endswith('*/'):
+                  idx = v.find('/*')
+                  comment = ' ' + v[idx:]
+                  v = v[:idx].strip()
+                  suffix = comment + suffix
+              # Wrap in quotes if it has spaces or parentheses and is unquoted
+              if (' ' in v or '(' in v or ')' in v) and not (v.startswith('"') and v.endswith('"')):
+                  return f'{prefix}"{v}"{suffix}'
+              return m.group(0)
+
           modified = False
           new_lines = []
           for i, line in enumerate(lines):
               s = line.strip()
-              
-              # 1. Strip git merge conflict markers
+
+              # 1. Remove git conflict markers
               if s.startswith(('<<<<<<<', '=======', '>>>>>>>')):
-                  print(f"Removing conflict marker at line {i+1}: {s}")
+                  print(f"Removing merge conflict marker at line {i+1}")
                   modified = True
                   continue
 
-              # 2. Fix unquoted paths containing spaces or parentheses (e.g. FOUGO File (9).3105;)
-              if '=' in s and ';' in s and not s.startswith(('//', '/*')):
-                  before, after = line.split('=', 1)
-                  val, rest = after.rsplit(';', 1)
-                  v = val.strip()
-                  comment = ''
-                  if '/*' in v and v.endswith('*/'):
-                      c_idx = v.find('/*')
-                      comment = ' ' + v[c_idx:]
-                      v = v[:c_idx].strip()
-                  
-                  if (' ' in v or '(' in v or ')' in v) and not (v.startswith('"') and v.endswith('"')):
-                      line = f"{before}= \"{v}\"{comment};{rest}"
-                      print(f"Auto-quoting value at line {i+1}: {s} -> {line.strip()}")
-                      modified = True
+              # 2. Fix all unquoted names/paths (FOUGO File (1).3105 on line 93, 353, etc.)
+              fixed_line = re.sub(pattern, quote_unquoted, line)
+              if fixed_line != line:
+                  print(f"Repaired unquoted name on line {i+1}: {fixed_line.strip()}")
+                  line = fixed_line
+                  s = line.strip()
+                  modified = True
 
               # 3. Fix missing semicolon on assignments
-              elif '=' in s and not s.startswith(('//', '/*')) and not s.endswith((';', '{', '(', ',')):
+              if '=' in s and not s.startswith(('//', '/*')) and not s.endswith((';', '{', '(', ',')):
                   indent = line[:len(line) - len(line.lstrip())]
                   comment = ''
                   val_part = s
@@ -136,14 +141,14 @@ jobs:
                       comment = ' ' + s[c_idx:]
                       val_part = s[:c_idx].strip()
                   line = f"{indent}{val_part};{comment}\n"
-                  print(f"Auto-fixing missing semicolon at line {i+1}: {s} -> {line.strip()}")
+                  print(f"Added missing semicolon on line {i+1}")
                   modified = True
 
-              # 4. Fix missing semicolon on closing brace '}' -> '};'
+              # 4. Fix missing semicolon on closing brace
               elif s == '}' and i < len(lines) - 2:
                   indent = line[:len(line) - len(line.lstrip())]
                   line = f"{indent}}};\n"
-                  print(f"Auto-fixing closing brace at line {i+1}: '}}' -> '}};'")
+                  print(f"Fixed closing brace on line {i+1}")
                   modified = True
 
               new_lines.append(line)
@@ -151,12 +156,12 @@ jobs:
           if modified:
               with open(pbx_path, 'w', encoding='utf-8') as f:
                   f.writelines(new_lines)
-              print("Successfully auto-repaired project.pbxproj syntax!")
+              print("Successfully repaired all project.pbxproj syntax errors!")
           else:
-              print("No syntax anomalies detected.")
+              print("No syntax anomalies found.")
           EOF
 
-          echo "Validating plist with macOS plutil..."
+          echo "Testing syntax with macOS plutil..."
           plutil -lint "$PBX_FILE" || true
 
       # ----------------------------------------------------
@@ -200,7 +205,7 @@ jobs:
       # ----------------------------------------------------
       - name: Package .app into .ipa
         run: |
-          echo "Searching for compiled .app bundle..."
+          echo "Locating compiled .app bundle..."
           APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
 
           if [ -z "$APP_PATH" ]; then
