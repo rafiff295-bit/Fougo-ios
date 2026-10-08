@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       zip_url:
-        description: 'Optional: Direct download URL to source .zip (leave empty if zip is uploaded to repo)'
+        description: 'Optional: Direct download URL to source .zip'
         required: false
         default: ''
         type: string
@@ -34,41 +34,36 @@ jobs:
           fetch-depth: 0
 
       # ----------------------------------------------------
-      # AUTO-EXTRACT ZIP FILES OR DOWNLOAD FROM URL
+      # SAFELY EXTRACT ZIP (HANDLES SPACES IN FILENAMES)
       # ----------------------------------------------------
       - name: Auto-Extract Zip Files
         run: |
-          echo "Checking for zip files..."
+          echo "Scanning for zip files..."
 
-          # 1. Download zip from URL if provided in manual trigger
+          # 1. Download if URL was provided
           ZIP_URL="${{ github.event.inputs.zip_url }}"
           if [ -n "$ZIP_URL" ]; then
             echo "Downloading ZIP from: $ZIP_URL"
-            curl -L -o downloaded_source.zip "$ZIP_URL"
+            curl -L -o "source_download.zip" "$ZIP_URL"
           fi
 
-          # 2. Find and extract any .zip file in the repository
-          ZIP_FILES=$(find . -maxdepth 2 -name "*.zip" -type f)
-          if [ -n "$ZIP_FILES" ]; then
-            echo "Found zip file(s):"
-            echo "$ZIP_FILES"
-            for z in $ZIP_FILES; do
-              echo "==> Unzipping $z..."
-              unzip -q -o "$z"
-            done
-            echo "Unzip complete."
-          else
-            echo "No .zip files found. Using checked-out files."
-          fi
+          # 2. Extract all .zip files safely (handling spaces like 'fougo vip iOS.zip')
+          find . -maxdepth 2 -name "*.zip" -type f | while IFS= read -r zipfile; do
+            if [ -n "$zipfile" ]; then
+              echo "==> Unzipping: $zipfile"
+              unzip -q -o "$zipfile"
+            fi
+          done
+
+          echo "Extraction complete. Current directory contents:"
+          ls -la
 
       # ----------------------------------------------------
-      # AUTOMATICALLY LOCATE .XCODEPROJ IN EXTRACTED FOLDERS
+      # LOCATE XCODE PROJECT
       # ----------------------------------------------------
       - name: Locate Xcode Project
         id: find-project
         run: |
-          echo "Scanning workspace for project..."
-
           PROJ_PATH=$(find . -name "ThreeOneOSFive.xcodeproj" -type d | head -n 1)
 
           if [ -z "$PROJ_PATH" ]; then
@@ -77,8 +72,7 @@ jobs:
 
           if [ -z "$PROJ_PATH" ]; then
             echo "::error::Could not find any .xcodeproj directory!"
-            echo "Files in workspace:"
-            ls -la
+            find . -maxdepth 3
             exit 1
           fi
 
@@ -129,11 +123,8 @@ jobs:
 
           echo "Found application bundle at: $APP_PATH"
 
-          # Create Payload directory structure
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
-
-          # Compress into FOUGO.ipa
           zip -vr FOUGO.ipa Payload
           rm -rf Payload
 
