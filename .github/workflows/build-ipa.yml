@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'Optional: Direct URL to source .zip (leave empty if zip is in repo)'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   build-ipa:
@@ -19,42 +25,65 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      # ----------------------------------------------------
-      # 1. EXTRACT ZIP
-      # ----------------------------------------------------
       - name: Extract Zip Files
         run: |
+          # 1. Download from direct URL if provided in workflow_dispatch
+          ZIP_URL="${{ github.event.inputs.zip_url }}"
+          if [ -n "$ZIP_URL" ]; then
+            echo "Downloading ZIP archive from: $ZIP_URL"
+            curl -L -f -o downloaded_archive.zip "$ZIP_URL"
+          fi
+
+          # 2. Extract zip archives safely (handling spaces in filenames)
           find . -maxdepth 2 -name "*.zip" -type f | while IFS= read -r f; do
-            echo "Unzipping: $f"
+            echo "Unzipping archive: $f"
             unzip -q -o "$f"
           done
 
-      # ----------------------------------------------------
-      # 2. LOCATE XCODE PROJECT
-      # ----------------------------------------------------
       - name: Locate Project & Scheme
         run: |
           PROJ_PATH=$(find . -name "ThreeOneOSFive.xcodeproj" -type d | head -n 1)
           [ -z "$PROJ_PATH" ] && PROJ_PATH=$(find . -name "*.xcodeproj" -type d | head -n 1)
           if [ -z "$PROJ_PATH" ]; then
-            echo "::error::No .xcodeproj found!"
+            echo "::error::No .xcodeproj found in repository or extracted archives!"
+            find . -maxdepth 3
             exit 1
           fi
+          echo "Located Xcode project at: $PROJ_PATH"
           echo "PROJECT_PATH=$PROJ_PATH" >> $GITHUB_ENV
+          echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> $GITHUB_ENV
 
-      # ----------------------------------------------------
-      # 3. FIX PROJECT SYNTAX & UNQUOTED NAMES
-      # ----------------------------------------------------
-      - name: Fix Project Syntax & Missing Quotes
+      - name: Repair and Validate Xcode Project Syntax
         run: |
           PBX="$PROJECT_PATH/project.pbxproj"
           echo "Repairing syntax in $PBX..."
-          python3 -c "import re, sys; p=sys.argv[1]; s=open(p, encoding='utf-8', errors='ignore').read(); open(p,'w', encoding='utf-8').write(re.sub(r'(\b\w+\s*=\s*)([^\";{}\n]+?)(\s*;)', lambda m: f'{m.group(1)}\"{m.group(2).strip()}\"{m.group(3)}' if (' ' in m.group(2) or '(' in m.group(2)) and not m.group(2).strip().startswith('\"') else m.group(0), s))" "$PBX"
+          python3 -c "
+          import re, sys
+          p = sys.argv[1]
+          with open(p, 'r', encoding='utf-8', errors='ignore') as f:
+              lines = f.read().splitlines()
+          repaired = []
+          for line in lines:
+              def quote_val(m):
+                  k = m.group(1)
+                  v = m.group(2).strip()
+                  s = m.group(3)
+                  if (' ' in v or '(' in v or ')' in v) and not v.startswith('\"'):
+                      v = f'\"{v}\"'
+                  return f'{k}{v}{s}'
+              line = re.sub(r'(\b\w+\s*=\s*)([^\";{}\n]+?)(\s*;|\s*$)', quote_val, line)
+              st = line.strip()
+              if st and not st.startswith('//') and not st.startswith('/*'):
+                  if st.endswith('}') and not st.endswith('};'):
+                      line = line + ';'
+                  elif '=' in st and not st.endswith(';') and not st.endswith('{'):
+                      line = line + ';'
+              repaired.append(line)
+          with open(p, 'w', encoding='utf-8') as f:
+              f.write('\n'.join(repaired) + '\n')
+          " "$PBX"
           plutil -lint "$PBX" || true
 
-      # ----------------------------------------------------
-      # 4. SYNC PATCH RESOURCES
-      # ----------------------------------------------------
       - name: Sync Patch Resource Files
         run: |
           find . -type d -name "Patches" | while read -r pdir; do
@@ -66,45 +95,91 @@ jobs:
             done
           done
 
-      # ----------------------------------------------------
-      # 5. FIX APP ICON DIMENSIONS
-      # ----------------------------------------------------
       - name: Fix AppIcon Dimensions to 1024x1024
         run: |
           find . -path "*/AppIcon.appiconset/*.png" -exec sips -z 1024 1024 {} + || true
 
-      # ----------------------------------------------------
-      # 6. INJECT SWIFT HELPERS WITHOUT REDECLARATION
-      # ----------------------------------------------------
       - name: Patch Missing Helpers in ContentView
         run: |
           find . -name "ContentView.swift" | while read -r cv; do
-            echo "Patching missing helpers into $cv..."
-            
-            # Check whether developerCredits is called with parentheses or without
-            if grep -E -q "developerCredits\s*\(" "$cv"; then
-              DEV_DEF='@ViewBuilder\nfunc developerCredits() -> some View {\n  HStack {\n    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)\n  }\n}'
-            else
-              DEV_DEF='@ViewBuilder\nvar developerCredits: some View {\n  HStack {\n    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)\n  }\n}'
+            echo "Verifying Swift helpers in $cv..."
+            PATCH=""
+            if ! grep -q "func statusRow" "$cv" && ! grep -q "var statusRow" "$cv"; then
+              PATCH="$PATCH
+@ViewBuilder
+func statusRow(icon: String, title: String, value: String, color: Color) -> some View {
+  HStack {
+    Label(title, systemImage: icon).font(.subheadline)
+    Spacer()
+    Text(value).font(.caption).fontWeight(.bold).foregroundColor(color)
+  }
+}
+"
+            fi
+            if ! grep -q "func panelTitle" "$cv" && ! grep -q "var panelTitle" "$cv"; then
+              PATCH="$PATCH
+@ViewBuilder
+func panelTitle(_ title: String, icon: String) -> some View {
+  HStack(spacing: 6) {
+    Image(systemName: icon).font(.system(size: 13, weight: .semibold))
+    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)
+  }
+}
+"
+            fi
+            if ! grep -q "developerCredits" "$cv"; then
+              if grep -E -q "developerCredits\s*\(" "$cv"; then
+                PATCH="$PATCH
+@ViewBuilder
+func developerCredits() -> some View {
+  HStack {
+    Text(\"FOUGO Developer\").font(.caption).foregroundColor(.secondary)
+  }
+}
+"
+              else
+                PATCH="$PATCH
+@ViewBuilder
+var developerCredits: some View {
+  HStack {
+    Text(\"FOUGO Developer\").font(.caption).foregroundColor(.secondary)
+  }
+}
+"
+              fi
             fi
 
-            printf "\n\nimport SwiftUI\n\n$DEV_DEF\n\n@ViewBuilder\nfunc statusRow(icon: String, title: String, value: String, color: Color) -> some View {\n  HStack {\n    Label(title, systemImage: icon).font(.subheadline)\n    Spacer()\n    Text(value).font(.caption).fontWeight(.bold).foregroundColor(color)\n  }\n}\n\n@ViewBuilder\nfunc panelTitle(_ title: String, icon: String) -> some View {\n  HStack(spacing: 6) {\n    Image(systemName: icon).font(.system(size: 13, weight: .semibold))\n    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)\n  }\n}\n" >> "$cv"
-            echo "Successfully patched $cv"
+            if [ -n "$PATCH" ]; then
+              printf "\n\nimport SwiftUI\n$PATCH\n" >> "$cv"
+              echo "Appended missing Swift helpers to $cv"
+            else
+              echo "No Swift helper patches needed for $cv"
+            fi
           done
 
-      # ----------------------------------------------------
-      # 7. SELECT XCODE VERSION
-      # ----------------------------------------------------
+      - name: Provide Missing Private Kernel Headers
+        run: |
+          echo "Providing private sys/fileport.h header for kexploit_opa334..."
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          sudo mkdir -p "$SDK_PATH/usr/include/sys"
+          printf '#ifndef _SYS_FILEPORT_H_\n#define _SYS_FILEPORT_H_\n#include <sys/cdefs.h>\n#include <sys/types.h>\n#include <mach/mach_types.h>\n#define FILEPORT_NULL 0\ntypedef mach_port_t fileport_t;\n__BEGIN_DECLS\nint fileport_makeport(int fd, fileport_t *port);\nint fileport_makefd(fileport_t port);\n__END_DECLS\n#endif\n' | sudo tee "$SDK_PATH/usr/include/sys/fileport.h" > /dev/null
+          
+          mkdir -p include/sys
+          printf '#ifndef _SYS_FILEPORT_H_\n#define _SYS_FILEPORT_H_\n#include <sys/cdefs.h>\n#include <sys/types.h>\n#include <mach/mach_types.h>\n#define FILEPORT_NULL 0\ntypedef mach_port_t fileport_t;\n__BEGIN_DECLS\nint fileport_makeport(int fd, fileport_t *port);\nint fileport_makefd(fileport_t port);\n__END_DECLS\n#endif\n' > include/sys/fileport.h
+          find . -type d -name "kexploit" | while read -r kdir; do
+            mkdir -p "$kdir/sys"
+            cp include/sys/fileport.h "$kdir/sys/fileport.h"
+          done
+
       - name: Select Xcode Version
         run: |
           if [ -d "/Applications/Xcode_15.4.app" ]; then
             sudo xcode-select -s "/Applications/Xcode_15.4.app/Contents/Developer"
+          elif [ -d "/Applications/Xcode.app" ]; then
+            sudo xcode-select -s "/Applications/Xcode.app/Contents/Developer"
           fi
           xcodebuild -version
 
-      # ----------------------------------------------------
-      # 8. COMPILE WITH XCODEBUILD
-      # ----------------------------------------------------
       - name: Compile with xcodebuild
         run: |
           set -o pipefail
@@ -123,31 +198,28 @@ jobs:
 
           if [ $BUILD_SUCCESS -ne 0 ]; then
             echo "=========================================="
-            echo "::error::COMPILATION FAILED! EXACT ERRORS:"
+            echo "::error::CRITICAL COMPILATION ERRORS FOUND:"
             grep -E "error:|fatal error:|\*\* BUILD FAILED \*\*" xcodebuild.log || true
             echo "=========================================="
             exit $BUILD_SUCCESS
           fi
 
-      # ----------------------------------------------------
-      # 9. PACKAGE .app INTO .ipa
-      # ----------------------------------------------------
       - name: Package .app into .ipa
         run: |
           APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "::error::No .app found!"
+            echo "::error::No .app found in build products!"
+            find build -maxdepth 4 || true
             exit 1
           fi
+          echo "Packaging application bundle: $APP_PATH"
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
-          zip -vr FOUGO.ipa Payload
+          zip -vr "FOUGO.ipa" Payload
           rm -rf Payload
-          ls -lh FOUGO.ipa
+          echo "Successfully generated IPA package:"
+          ls -lh "FOUGO.ipa"
 
-      # ----------------------------------------------------
-      # 10. UPLOAD ARTIFACT
-      # ----------------------------------------------------
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
