@@ -115,10 +115,7 @@ for p in sys.argv[1:]:
     if os.path.isfile(p):
         repair_pbx(p)
 PYEOF
-          PROJECT_FILES=$(find . -name "project.pbxproj" -type f)
-          if [ -n "$PROJECT_FILES" ]; then
-            python3 repair_pbxproj.py $PROJECT_FILES
-          fi
+          find . -name "project.pbxproj" -type f -exec python3 repair_pbxproj.py {} +
 
       - name: Locate Project & Scheme
         run: |
@@ -133,18 +130,32 @@ PYEOF
           echo "PROJECT_PATH=$PROJ_PATH" >> "$GITHUB_ENV"
           echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> "$GITHUB_ENV"
 
-          # Detect scheme
-          SCHEME="FOUGO"
-          AVAILABLE_SCHEMES=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Schemes:/{f=1;next}/^$/{f=0}f{gsub(/^[ \t]+/, ""); print}')
+          # Detect scheme and target
+          AVAILABLE_SCHEMES=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Schemes:/{f=1;next}/^$/{f=0}f{gsub(/^[ \t]+/, ""); if(length) print}')
+          AVAILABLE_TARGETS=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Targets:/{f=1;next}/Build Configurations:/{f=0}f{gsub(/^[ \t]+/, ""); if(length) print}')
           echo "Detected project schemes: $AVAILABLE_SCHEMES"
-          if ! echo "$AVAILABLE_SCHEMES" | grep -qx "$SCHEME"; then
-            FALLBACK_SCHEME=$(echo "$AVAILABLE_SCHEMES" | head -n 1)
-            if [ -n "$FALLBACK_SCHEME" ]; then
-              echo "Configured scheme '$SCHEME' not found, defaulting to detected scheme '$FALLBACK_SCHEME'"
-              SCHEME="$FALLBACK_SCHEME"
-            fi
+          echo "Detected project targets: $AVAILABLE_TARGETS"
+
+          SCHEME="FOUGO"
+          BUILD_TARGET_FLAG=""
+          if echo "$AVAILABLE_SCHEMES" | grep -qx "$SCHEME"; then
+            echo "Using specified scheme: $SCHEME"
+            BUILD_TARGET_FLAG="-scheme $SCHEME"
+          elif [ -n "$AVAILABLE_SCHEMES" ]; then
+            FIRST_SCHEME=$(echo "$AVAILABLE_SCHEMES" | head -n 1)
+            echo "Configured scheme '$SCHEME' not found, defaulting to detected scheme '$FIRST_SCHEME'"
+            BUILD_TARGET_FLAG="-scheme $FIRST_SCHEME"
+          elif echo "$AVAILABLE_TARGETS" | grep -qx "$SCHEME"; then
+            echo "Using target: $SCHEME"
+            BUILD_TARGET_FLAG="-target $SCHEME"
+          elif [ -n "$AVAILABLE_TARGETS" ]; then
+            FIRST_TARGET=$(echo "$AVAILABLE_TARGETS" | head -n 1)
+            echo "No schemes found, defaulting to detected target '$FIRST_TARGET'"
+            BUILD_TARGET_FLAG="-target $FIRST_TARGET"
+          else
+            BUILD_TARGET_FLAG="-scheme $SCHEME"
           fi
-          echo "TARGET_SCHEME=$SCHEME" >> "$GITHUB_ENV"
+          echo "BUILD_TARGET_FLAG=$BUILD_TARGET_FLAG" >> "$GITHUB_ENV"
 
       - name: Provide Missing Private Kernel Headers
         run: |
@@ -199,7 +210,7 @@ PYEOF
 
       - name: Patch Missing Helpers in ContentView
         run: |
-          find . -name "ContentView.swift" | while IFS= read -r cv; do
+          find . -name "ContentView.swift" | while read -r cv; do
             echo "Verifying Swift helpers in $cv..."
             if ! grep -q "func statusRow" "$cv" && ! grep -q "var statusRow" "$cv"; then
               echo '' >> "$cv"
@@ -250,7 +261,7 @@ PYEOF
           BUILD_SUCCESS=0
           xcodebuild clean build \
             -project "$PROJECT_PATH" \
-            -scheme "$TARGET_SCHEME" \
+            $BUILD_TARGET_FLAG \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
@@ -263,7 +274,7 @@ PYEOF
           if [ $BUILD_SUCCESS -ne 0 ]; then
             echo "=========================================="
             echo "::error::CRITICAL COMPILATION ERRORS FOUND:"
-            grep -E "error:|fatal error:|\*\* BUILD FAILED \*\*" xcodebuild.log || true
+            grep -E "error:|fatal error:|** BUILD FAILED **" xcodebuild.log || true
             echo "=========================================="
             exit $BUILD_SUCCESS
           fi
