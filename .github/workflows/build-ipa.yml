@@ -39,7 +39,7 @@ jobs:
           elif [ -d "/Applications/Xcode.app" ]; then
             sudo xcode-select -s "/Applications/Xcode.app/Contents/Developer"
           fi
-          xcodebuild -version || true
+          xcodebuild -version
 
       - name: Extract Zip Files
         run: |
@@ -47,13 +47,13 @@ jobs:
           ZIP_URL="${{ github.event.inputs.zip_url }}"
           if [ -n "$ZIP_URL" ]; then
             echo "Downloading ZIP archive from: $ZIP_URL"
-            curl -L -f -o downloaded_archive.zip "$ZIP_URL"
+            curl -L -f -o downloaded_archive.zip "$ZIP_URL" || true
           fi
 
           # 2. Extract any zip files in the repo safely (handling spaces in filenames)
           find . -maxdepth 2 -name "*.zip" -type f | while IFS= read -r f; do
             echo "Unzipping archive: $f"
-            unzip -q -o "$f"
+            unzip -q -o "$f" || true
           done
 
       - name: Locate Project & Scheme
@@ -66,12 +66,12 @@ jobs:
             exit 1
           fi
           echo "Located Xcode project at: $PROJ_PATH"
-          echo "PROJECT_PATH=$PROJ_PATH" >> $GITHUB_ENV
-          echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> $GITHUB_ENV
+          echo "PROJECT_PATH=$PROJ_PATH" >> "$GITHUB_ENV"
+          echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> "$GITHUB_ENV"
 
           # Detect scheme
           SCHEME="FOUGO"
-          AVAILABLE_SCHEMES=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Schemes:/{f=1;next}/^$/{f=0}f{gsub(/^[ 	]+/, ""); print}')
+          AVAILABLE_SCHEMES=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Schemes:/{f=1;next}/^$/{f=0}f{gsub(/^[ \t]+/, ""); print}')
           echo "Detected project schemes: $AVAILABLE_SCHEMES"
           if ! echo "$AVAILABLE_SCHEMES" | grep -qx "$SCHEME"; then
             FALLBACK_SCHEME=$(echo "$AVAILABLE_SCHEMES" | head -n 1)
@@ -80,39 +80,22 @@ jobs:
               SCHEME="$FALLBACK_SCHEME"
             fi
           fi
-          echo "TARGET_SCHEME=$SCHEME" >> $GITHUB_ENV
+          echo "TARGET_SCHEME=$SCHEME" >> "$GITHUB_ENV"
 
       - name: Repair and Validate Xcode Project Syntax
         run: |
           PBX="$PROJECT_PATH/project.pbxproj"
-          echo "Validating $PBX syntax..."
-          python3 -c '
-import sys, re, os
-pbx = sys.argv[1] if len(sys.argv) > 1 else ""
-if not pbx or not os.path.exists(pbx):
-    sys.exit(0)
-if os.system(f"plutil -lint "{pbx}" >/dev/null 2>&1") == 0:
-    print(f"Xcode project {pbx} is already valid syntax.")
-    sys.exit(0)
-print(f"Repairing syntax issues in {pbx}...")
-try:
-    with open(pbx, "r", encoding="utf-8", errors="ignore") as f:
-        content = f.read()
-    def quote_val(m):
-        k = m.group(1)
-        v = m.group(2).strip()
-        s = m.group(3)
-        if (" " in v or "(" in v or ")" in v) and not (v.startswith(""") and v.endswith(""")) and not v.startswith("{") and not v.startswith("("):
-            v = f""{v}""
-        return f"{k}{v}{s}"
-    fixed = re.sub(r"((?:name|path)s*=s*)([^;]+?)(;)", quote_val, content)
-    with open(pbx, "w", encoding="utf-8") as f:
-        f.write(fixed)
-    print("Project syntax repair applied.")
-except Exception as e:
-    print(f"Note: {e}")
-' "$PBX" || true
-          plutil -lint "$PBX" || true
+          echo "Checking $PBX syntax..."
+          if [ -f "$PBX" ]; then
+            # Quote unquoted file names or paths containing spaces or parentheses (e.g. FOUGO File (1).3105)
+            sed -i '' -E 's/name = ([^";]+ [^";]+);/name = "\1";/g' "$PBX" 2>/dev/null || sed -i -E 's/name = ([^";]+ [^";]+);/name = "\1";/g' "$PBX" 2>/dev/null || true
+            sed -i '' -E 's/path = ([^";]+ [^";]+);/path = "\1";/g' "$PBX" 2>/dev/null || sed -i -E 's/path = ([^";]+ [^";]+);/path = "\1";/g' "$PBX" 2>/dev/null || true
+            sed -i '' -E 's/name = ([^";]*\([^";]*\)[^";]*);/name = "\1";/g' "$PBX" 2>/dev/null || sed -i -E 's/name = ([^";]*\([^";]*\)[^";]*);/name = "\1";/g' "$PBX" 2>/dev/null || true
+            sed -i '' -E 's/path = ([^";]*\([^";]*\)[^";]*);/path = "\1";/g' "$PBX" 2>/dev/null || sed -i -E 's/path = ([^";]*\([^";]*\)[^";]*);/path = "\1";/g' "$PBX" 2>/dev/null || true
+            sed -i '' 's/""/"/g' "$PBX" 2>/dev/null || sed -i 's/""/"/g' "$PBX" 2>/dev/null || true
+            echo "Linting project file:"
+            plutil -lint "$PBX" || true
+          fi
 
       - name: Provide Missing Private Kernel Headers
         run: |
@@ -123,19 +106,18 @@ except Exception as e:
           fi
 
           mkdir -p include/sys
-          printf '#ifndef _SYS_FILEPORT_H_
-#define _SYS_FILEPORT_H_
-#include <sys/cdefs.h>
-#include <sys/types.h>
-#include <mach/mach_types.h>
-#define FILEPORT_NULL 0
-typedef mach_port_t fileport_t;
-__BEGIN_DECLS
-int fileport_makeport(int fd, fileport_t *port);
-int fileport_makefd(fileport_t port);
-__END_DECLS
-#endif
-' > include/sys/fileport.h
+          echo '#ifndef _SYS_FILEPORT_H_' > include/sys/fileport.h
+          echo '#define _SYS_FILEPORT_H_' >> include/sys/fileport.h
+          echo '#include <sys/cdefs.h>' >> include/sys/fileport.h
+          echo '#include <sys/types.h>' >> include/sys/fileport.h
+          echo '#include <mach/mach_types.h>' >> include/sys/fileport.h
+          echo '#define FILEPORT_NULL 0' >> include/sys/fileport.h
+          echo 'typedef mach_port_t fileport_t;' >> include/sys/fileport.h
+          echo '__BEGIN_DECLS' >> include/sys/fileport.h
+          echo 'int fileport_makeport(int fd, fileport_t *port);' >> include/sys/fileport.h
+          echo 'int fileport_makefd(fileport_t port);' >> include/sys/fileport.h
+          echo '__END_DECLS' >> include/sys/fileport.h
+          echo '#endif' >> include/sys/fileport.h
 
           if [ -n "$SDK_PATH" ] && [ -d "$SDK_PATH/usr/include/sys" ]; then
             sudo cp -f include/sys/fileport.h "$SDK_PATH/usr/include/sys/fileport.h" 2>/dev/null || true
@@ -156,7 +138,8 @@ __END_DECLS
             echo "Syncing patch assets in $pdir..."
             for f in "$pdir"/"FOUGO File "*; do
               if [ -f "$f" ]; then
-                cp -f "$f" "${f/FOUGO File/FOUGO EXTERNAL File}" 2>/dev/null || true
+                DEST=$(echo "$f" | sed 's/FOUGO File/FOUGO EXTERNAL File/')
+                cp -f "$f" "$DEST" 2>/dev/null || true
               fi
             done
           done
@@ -170,49 +153,44 @@ __END_DECLS
           find . -name "ContentView.swift" | while read -r cv; do
             echo "Verifying Swift helpers in $cv..."
             if ! grep -q "func statusRow" "$cv" && ! grep -q "var statusRow" "$cv"; then
-              printf '
-import SwiftUI
-
-@ViewBuilder
-func statusRow(icon: String, title: String, value: String, color: Color) -> some View {
-  HStack {
-    Label(title, systemImage: icon).font(.subheadline)
-    Spacer()
-    Text(value).font(.caption).fontWeight(.bold)
-  }
-}
-' >> "$cv"
+              echo '' >> "$cv"
+              echo 'import SwiftUI' >> "$cv"
+              echo '@ViewBuilder' >> "$cv"
+              echo 'func statusRow(icon: String, title: String, value: String, color: Color) -> some View {' >> "$cv"
+              echo '  HStack {' >> "$cv"
+              echo '    Label(title, systemImage: icon).font(.subheadline)' >> "$cv"
+              echo '    Spacer()' >> "$cv"
+              echo '    Text(value).font(.caption).fontWeight(.bold)' >> "$cv"
+              echo '  }' >> "$cv"
+              echo '}' >> "$cv"
             fi
             if ! grep -q "func panelTitle" "$cv" && ! grep -q "var panelTitle" "$cv"; then
-              printf '
-@ViewBuilder
-func panelTitle(_ title: String, icon: String) -> some View {
-  HStack(spacing: 6) {
-    Image(systemName: icon).font(.system(size: 13, weight: .semibold))
-    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)
-  }
-}
-' >> "$cv"
+              echo '' >> "$cv"
+              echo '@ViewBuilder' >> "$cv"
+              echo 'func panelTitle(_ title: String, icon: String) -> some View {' >> "$cv"
+              echo '  HStack(spacing: 6) {' >> "$cv"
+              echo '    Image(systemName: icon).font(.system(size: 13, weight: .semibold))' >> "$cv"
+              echo '    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)' >> "$cv"
+              echo '  }' >> "$cv"
+              echo '}' >> "$cv"
             fi
             if ! grep -q "developerCredits" "$cv"; then
               if grep -q "developerCredits()" "$cv"; then
-                printf '
-@ViewBuilder
-func developerCredits() -> some View {
-  HStack {
-    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)
-  }
-}
-' >> "$cv"
+                echo '' >> "$cv"
+                echo '@ViewBuilder' >> "$cv"
+                echo 'func developerCredits() -> some View {' >> "$cv"
+                echo '  HStack {' >> "$cv"
+                echo '    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)' >> "$cv"
+                echo '  }' >> "$cv"
+                echo '}' >> "$cv"
               else
-                printf '
-@ViewBuilder
-var developerCredits: some View {
-  HStack {
-    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)
-  }
-}
-' >> "$cv"
+                echo '' >> "$cv"
+                echo '@ViewBuilder' >> "$cv"
+                echo 'var developerCredits: some View {' >> "$cv"
+                echo '  HStack {' >> "$cv"
+                echo '    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)' >> "$cv"
+                echo '  }' >> "$cv"
+                echo '}' >> "$cv"
               fi
             fi
           done
@@ -236,7 +214,7 @@ var developerCredits: some View {
           if [ $BUILD_SUCCESS -ne 0 ]; then
             echo "=========================================="
             echo "::error::CRITICAL COMPILATION ERRORS FOUND:"
-            grep -E "error:|fatal error:|** BUILD FAILED **" xcodebuild.log || true
+            grep -E "error:|fatal error:|\*\* BUILD FAILED \*\*" xcodebuild.log || true
             echo "=========================================="
             exit $BUILD_SUCCESS
           fi
