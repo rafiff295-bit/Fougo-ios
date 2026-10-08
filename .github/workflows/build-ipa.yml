@@ -74,13 +74,21 @@ jobs:
           find . -path "*/AppIcon.appiconset/*.png" -exec sips -z 1024 1024 {} + || true
 
       # ----------------------------------------------------
-      # 6. INJECT ALL MISSING SWIFT HELPERS
+      # 6. INJECT SWIFT HELPERS WITHOUT REDECLARATION
       # ----------------------------------------------------
       - name: Patch Missing Helpers in ContentView
         run: |
           find . -name "ContentView.swift" | while read -r cv; do
             echo "Patching missing helpers into $cv..."
-            printf '\n\nimport SwiftUI\n\n@ViewBuilder\nvar developerCredits: some View {\n  HStack {\n    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)\n  }\n}\n\n@ViewBuilder\nfunc developerCredits() -> some View {\n  developerCredits\n}\n\n@ViewBuilder\nfunc statusRow(icon: String, title: String, value: String, color: Color) -> some View {\n  HStack {\n    Label(title, systemImage: icon).font(.subheadline)\n    Spacer()\n    Text(value).font(.caption).fontWeight(.bold).foregroundColor(color)\n  }\n}\n\n@ViewBuilder\nfunc panelTitle(_ title: String, icon: String) -> some View {\n  HStack(spacing: 6) {\n    Image(systemName: icon).font(.system(size: 13, weight: .semibold))\n    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)\n  }\n}\n' >> "$cv"
+            
+            # Check whether developerCredits is called with parentheses or without
+            if grep -E -q "developerCredits\s*\(" "$cv"; then
+              DEV_DEF='@ViewBuilder\nfunc developerCredits() -> some View {\n  HStack {\n    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)\n  }\n}'
+            else
+              DEV_DEF='@ViewBuilder\nvar developerCredits: some View {\n  HStack {\n    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)\n  }\n}'
+            fi
+
+            printf "\n\nimport SwiftUI\n\n$DEV_DEF\n\n@ViewBuilder\nfunc statusRow(icon: String, title: String, value: String, color: Color) -> some View {\n  HStack {\n    Label(title, systemImage: icon).font(.subheadline)\n    Spacer()\n    Text(value).font(.caption).fontWeight(.bold).foregroundColor(color)\n  }\n}\n\n@ViewBuilder\nfunc panelTitle(_ title: String, icon: String) -> some View {\n  HStack(spacing: 6) {\n    Image(systemName: icon).font(.system(size: 13, weight: .semibold))\n    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)\n  }\n}\n" >> "$cv"
             echo "Successfully patched $cv"
           done
 
