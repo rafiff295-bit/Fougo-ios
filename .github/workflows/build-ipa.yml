@@ -31,6 +31,16 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Select Xcode Version
+        run: |
+          echo "Selecting Xcode version..."
+          if [ -d "/Applications/Xcode_15.4.app" ]; then
+            sudo xcode-select -s "/Applications/Xcode_15.4.app/Contents/Developer"
+          elif [ -d "/Applications/Xcode.app" ]; then
+            sudo xcode-select -s "/Applications/Xcode.app/Contents/Developer"
+          fi
+          xcodebuild -version || true
+
       - name: Extract Zip Files
         run: |
           # 1. Download from direct URL if supplied in workflow_dispatch
@@ -59,12 +69,86 @@ jobs:
           echo "PROJECT_PATH=$PROJ_PATH" >> $GITHUB_ENV
           echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> $GITHUB_ENV
 
+          # Detect scheme
+          SCHEME="FOUGO"
+          AVAILABLE_SCHEMES=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Schemes:/{f=1;next}/^$/{f=0}f{gsub(/^[ 	]+/, ""); print}')
+          echo "Detected project schemes: $AVAILABLE_SCHEMES"
+          if ! echo "$AVAILABLE_SCHEMES" | grep -qx "$SCHEME"; then
+            FALLBACK_SCHEME=$(echo "$AVAILABLE_SCHEMES" | head -n 1)
+            if [ -n "$FALLBACK_SCHEME" ]; then
+              echo "Configured scheme '$SCHEME' not found, defaulting to detected scheme '$FALLBACK_SCHEME'"
+              SCHEME="$FALLBACK_SCHEME"
+            fi
+          fi
+          echo "TARGET_SCHEME=$SCHEME" >> $GITHUB_ENV
+
       - name: Repair and Validate Xcode Project Syntax
         run: |
           PBX="$PROJECT_PATH/project.pbxproj"
-          echo "Repairing syntax in $PBX..."
-          python3 -c "import base64, sys; exec(base64.b64decode('aW1wb3J0IHN5cywgcmUKCnAgPSBzeXMuYXJndlsxXQp3aXRoIG9wZW4ocCwgJ3InLCBlbmNvZGluZz0ndXRmLTgnLCBlcnJvcnM9J2lnbm9yZScpIGFzIGY6CiAgICBsaW5lcyA9IGYucmVhZCgpLnNwbGl0bGluZXMoKQoKcmVwYWlyZWQgPSBbXQpmb3IgbGluZSBpbiBsaW5lczoKICAgIGRlZiBxdW90ZV92YWwobSk6CiAgICAgICAgayA9IG0uZ3JvdXAoMSkKICAgICAgICB2ID0gbS5ncm91cCgyKS5zdHJpcCgpCiAgICAgICAgcyA9IG0uZ3JvdXAoMykKICAgICAgICBpZiAoJyAnIGluIHYgb3IgJygnIGluIHYgb3IgJyknIGluIHYpIGFuZCBub3Qgdi5zdGFydHN3aXRoKCciJyk6CiAgICAgICAgICAgIHYgPSBmJyJ7dn0iJwogICAgICAgIHJldHVybiBmJ3trfXt2fXtzfScKICAgIGxpbmUgPSByZS5zdWIocicoCFx3K1xzKj1ccyopKFteInt9Cl0rPykoXHMqO3xccyokKScsIHF1b3RlX3ZhbCwgbGluZSkKICAgIHN0ID0gbGluZS5zdHJpcCgpCiAgICBpZiBzdCBhbmQgbm90IHN0LnN0YXJ0c3dpdGgoJy8vJykgYW5kIG5vdCBzdC5zdGFydHN3aXRoKCcvKicpOgogICAgICAgIGlmIHN0LmVuZHN3aXRoKCd9JykgYW5kIG5vdCBzdC5lbmRzd2l0aCgnfTsnKToKICAgICAgICAgICAgbGluZSA9IGxpbmUgKyAnOycKICAgICAgICBlbGlmICc9JyBpbiBzdCBhbmQgbm90IHN0LmVuZHN3aXRoKCc7JykgYW5kIG5vdCBzdC5lbmRzd2l0aCgneycpOgogICAgICAgICAgICBsaW5lID0gbGluZSArICc7JwogICAgcmVwYWlyZWQuYXBwZW5kKGxpbmUpCgp3aXRoIG9wZW4ocCwgJ3cnLCBlbmNvZGluZz0ndXRmLTgnKSBhcyBmOgogICAgZi53cml0ZSgnCicuam9pbihyZXBhaXJlZCkgKyAnCicpCg==').decode('utf-8'))" "$PBX"
+          echo "Validating $PBX syntax..."
+          python3 -c '
+import sys, re, os
+pbx = sys.argv[1] if len(sys.argv) > 1 else ""
+if not pbx or not os.path.exists(pbx):
+    sys.exit(0)
+if os.system(f"plutil -lint "{pbx}" >/dev/null 2>&1") == 0:
+    print(f"Xcode project {pbx} is already valid syntax.")
+    sys.exit(0)
+print(f"Repairing syntax issues in {pbx}...")
+try:
+    with open(pbx, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
+    def quote_val(m):
+        k = m.group(1)
+        v = m.group(2).strip()
+        s = m.group(3)
+        if (" " in v or "(" in v or ")" in v) and not (v.startswith(""") and v.endswith(""")) and not v.startswith("{") and not v.startswith("("):
+            v = f""{v}""
+        return f"{k}{v}{s}"
+    fixed = re.sub(r"((?:name|path)s*=s*)([^;]+?)(;)", quote_val, content)
+    with open(pbx, "w", encoding="utf-8") as f:
+        f.write(fixed)
+    print("Project syntax repair applied.")
+except Exception as e:
+    print(f"Note: {e}")
+' "$PBX" || true
           plutil -lint "$PBX" || true
+
+      - name: Provide Missing Private Kernel Headers
+        run: |
+          echo "Providing private sys/fileport.h header for kexploit_opa334..."
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || echo "")
+          if [ -n "$SDK_PATH" ]; then
+            sudo mkdir -p "$SDK_PATH/usr/include/sys" 2>/dev/null || true
+          fi
+
+          mkdir -p include/sys
+          printf '#ifndef _SYS_FILEPORT_H_
+#define _SYS_FILEPORT_H_
+#include <sys/cdefs.h>
+#include <sys/types.h>
+#include <mach/mach_types.h>
+#define FILEPORT_NULL 0
+typedef mach_port_t fileport_t;
+__BEGIN_DECLS
+int fileport_makeport(int fd, fileport_t *port);
+int fileport_makefd(fileport_t port);
+__END_DECLS
+#endif
+' > include/sys/fileport.h
+
+          if [ -n "$SDK_PATH" ] && [ -d "$SDK_PATH/usr/include/sys" ]; then
+            sudo cp -f include/sys/fileport.h "$SDK_PATH/usr/include/sys/fileport.h" 2>/dev/null || true
+          fi
+
+          find . -type d -name "*kexploit*" | while read -r kdir; do
+            mkdir -p "$kdir/sys"
+            cp -f include/sys/fileport.h "$kdir/sys/fileport.h" 2>/dev/null || true
+          done
+          find . -type d -name "*opa334*" | while read -r kdir; do
+            mkdir -p "$kdir/sys"
+            cp -f include/sys/fileport.h "$kdir/sys/fileport.h" 2>/dev/null || true
+          done
 
       - name: Sync Patch Resource Files
         run: |
@@ -72,14 +156,14 @@ jobs:
             echo "Syncing patch assets in $pdir..."
             for f in "$pdir"/"FOUGO File "*; do
               if [ -f "$f" ]; then
-                cp -f "$f" "${f/FOUGO File/FOUGO EXTERNAL File}"
+                cp -f "$f" "${f/FOUGO File/FOUGO EXTERNAL File}" 2>/dev/null || true
               fi
             done
           done
 
       - name: Fix AppIcon Dimensions to 1024x1024
         run: |
-          find . -path "*/AppIcon.appiconset/*.png" -exec sips -z 1024 1024 {} + || true
+          find . -path "*/AppIcon.appiconset/*.png" -exec sips -z 1024 1024 {} + 2>/dev/null || true
 
       - name: Patch Missing Helpers in ContentView
         run: |
@@ -111,7 +195,17 @@ func panelTitle(_ title: String, icon: String) -> some View {
 ' >> "$cv"
             fi
             if ! grep -q "developerCredits" "$cv"; then
-              printf '
+              if grep -q "developerCredits()" "$cv"; then
+                printf '
+@ViewBuilder
+func developerCredits() -> some View {
+  HStack {
+    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)
+  }
+}
+' >> "$cv"
+              else
+                printf '
 @ViewBuilder
 var developerCredits: some View {
   HStack {
@@ -119,55 +213,9 @@ var developerCredits: some View {
   }
 }
 ' >> "$cv"
+              fi
             fi
           done
-
-      - name: Provide Missing Private Kernel Headers
-        run: |
-          echo "Providing private sys/fileport.h header for kexploit_opa334..."
-          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-          sudo mkdir -p "$SDK_PATH/usr/include/sys"
-          printf '#ifndef _SYS_FILEPORT_H_
-#define _SYS_FILEPORT_H_
-#include <sys/cdefs.h>
-#include <sys/types.h>
-#include <mach/mach_types.h>
-#define FILEPORT_NULL 0
-typedef mach_port_t fileport_t;
-__BEGIN_DECLS
-int fileport_makeport(int fd, fileport_t *port);
-int fileport_makefd(fileport_t port);
-__END_DECLS
-#endif
-' | sudo tee "$SDK_PATH/usr/include/sys/fileport.h" > /dev/null
-          
-          mkdir -p include/sys
-          printf '#ifndef _SYS_FILEPORT_H_
-#define _SYS_FILEPORT_H_
-#include <sys/cdefs.h>
-#include <sys/types.h>
-#include <mach/mach_types.h>
-#define FILEPORT_NULL 0
-typedef mach_port_t fileport_t;
-__BEGIN_DECLS
-int fileport_makeport(int fd, fileport_t *port);
-int fileport_makefd(fileport_t port);
-__END_DECLS
-#endif
-' > include/sys/fileport.h
-          find . -type d -name "kexploit" | while read -r kdir; do
-            mkdir -p "$kdir/sys"
-            cp include/sys/fileport.h "$kdir/sys/fileport.h"
-          done
-
-      - name: Select Xcode Version
-        run: |
-          if [ -d "/Applications/Xcode_15.4.app" ]; then
-            sudo xcode-select -s "/Applications/Xcode_15.4.app/Contents/Developer"
-          elif [ -d "/Applications/Xcode.app" ]; then
-            sudo xcode-select -s "/Applications/Xcode.app/Contents/Developer"
-          fi
-          xcodebuild -version
 
       - name: Compile with xcodebuild
         run: |
@@ -175,7 +223,7 @@ __END_DECLS
           BUILD_SUCCESS=0
           xcodebuild clean build \
             -project "$PROJECT_PATH" \
-            -scheme "FOUGO" \
+            -scheme "$TARGET_SCHEME" \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
@@ -195,14 +243,18 @@ __END_DECLS
 
       - name: Package .app into .ipa
         run: |
-          APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
+          APP_PATH=$(find build/Build/Products -maxdepth 3 -name "*.app" -type d | grep -v "/Payload/" | head -n 1)
+          [ -z "$APP_PATH" ] && APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "::error::No .app found!"
+            echo "::error::No compiled .app bundle found!"
+            find build -maxdepth 4
             exit 1
           fi
+          echo "Found application bundle: $APP_PATH"
+          rm -rf Payload
           mkdir -p Payload
-          cp -r "$APP_PATH" Payload/
-          zip -vr "FOUGO.ipa" Payload
+          cp -R "$APP_PATH" Payload/
+          zip -r "FOUGO.ipa" Payload
           rm -rf Payload
           ls -lh "FOUGO.ipa"
 
