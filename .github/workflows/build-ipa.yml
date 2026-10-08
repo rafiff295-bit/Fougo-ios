@@ -74,16 +74,14 @@ jobs:
           find . -path "*/AppIcon.appiconset/*.png" -exec sips -z 1024 1024 {} + || true
 
       # ----------------------------------------------------
-      # 6. APPEND panelTitle HELPER TO BOTTOM OF SWIFT FILE
+      # 6. INJECT ALL MISSING SWIFT HELPERS
       # ----------------------------------------------------
-      - name: Patch Missing panelTitle in ContentView
+      - name: Patch Missing Helpers in ContentView
         run: |
           find . -name "ContentView.swift" | while read -r cv; do
-            if grep -q "panelTitle(" "$cv" && ! grep -q "func panelTitle" "$cv"; then
-              echo "Appending panelTitle helper to end of $cv..."
-              printf '\n\n@ViewBuilder\nfunc panelTitle(_ title: String, icon: String) -> some View {\n  HStack(spacing: 6) {\n    Image(systemName: icon).font(.system(size: 13, weight: .semibold))\n    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)\n  }\n}\n' >> "$cv"
-              echo "Appended panelTitle to $cv"
-            fi
+            echo "Patching missing helpers into $cv..."
+            printf '\n\nimport SwiftUI\n\n@ViewBuilder\nvar developerCredits: some View {\n  HStack {\n    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)\n  }\n}\n\n@ViewBuilder\nfunc developerCredits() -> some View {\n  developerCredits\n}\n\n@ViewBuilder\nfunc statusRow(icon: String, title: String, value: String, color: Color) -> some View {\n  HStack {\n    Label(title, systemImage: icon).font(.subheadline)\n    Spacer()\n    Text(value).font(.caption).fontWeight(.bold).foregroundColor(color)\n  }\n}\n\n@ViewBuilder\nfunc panelTitle(_ title: String, icon: String) -> some View {\n  HStack(spacing: 6) {\n    Image(systemName: icon).font(.system(size: 13, weight: .semibold))\n    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)\n  }\n}\n' >> "$cv"
+            echo "Successfully patched $cv"
           done
 
       # ----------------------------------------------------
@@ -97,7 +95,7 @@ jobs:
           xcodebuild -version
 
       # ----------------------------------------------------
-      # 8. COMPILE WITH XCODEBUILD & DETAILED ERROR LOGGING
+      # 8. COMPILE WITH XCODEBUILD
       # ----------------------------------------------------
       - name: Compile with xcodebuild
         run: |
