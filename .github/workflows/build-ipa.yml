@@ -6,20 +6,6 @@ on:
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
-    inputs:
-      zip_url:
-        description: 'Optional: Direct download URL to source .zip'
-        required: false
-        default: ''
-        type: string
-      build_configuration:
-        description: 'Build Configuration'
-        required: true
-        default: 'Release'
-        type: choice
-        options:
-          - Release
-          - Debug
 
 jobs:
   build-ipa:
@@ -27,220 +13,64 @@ jobs:
     runs-on: macos-14
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout Source
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
-      # ----------------------------------------------------
-      # 1. EXTRACT ZIP (HANDLES SPACES IN ZIP NAME)
-      # ----------------------------------------------------
-      - name: Auto-Extract Zip Files
+      - name: Extract Zip Files
         run: |
-          echo "Scanning for zip files..."
-
-          ZIP_URL="${{ github.event.inputs.zip_url }}"
-          if [ -n "$ZIP_URL" ]; then
-            echo "Downloading ZIP from: $ZIP_URL"
-            curl -L -o "source_download.zip" "$ZIP_URL"
-          fi
-
-          find . -maxdepth 2 -name "*.zip" -type f | while IFS= read -r zipfile; do
-            if [ -n "$zipfile" ]; then
-              echo "==> Unzipping: $zipfile"
-              unzip -q -o "$zipfile"
-            fi
+          find . -maxdepth 2 -name "*.zip" -type f | while IFS= read -r f; do
+            echo "Unzipping: $f"
+            unzip -q -o "$f"
           done
 
-      # ----------------------------------------------------
-      # 2. LOCATE XCODE PROJECT
-      # ----------------------------------------------------
-      - name: Locate Xcode Project
-        id: find-project
+      - name: Locate Project & Scheme
         run: |
           PROJ_PATH=$(find . -name "ThreeOneOSFive.xcodeproj" -type d | head -n 1)
-
+          [ -z "$PROJ_PATH" ] && PROJ_PATH=$(find . -name "*.xcodeproj" -type d | head -n 1)
           if [ -z "$PROJ_PATH" ]; then
-            PROJ_PATH=$(find . -name "*.xcodeproj" -type d | head -n 1)
-          fi
-
-          if [ -z "$PROJ_PATH" ]; then
-            echo "::error::Could not find any .xcodeproj directory!"
-            find . -maxdepth 3
+            echo "::error::No .xcodeproj found!"
             exit 1
           fi
-
-          echo "Found Xcode project at: $PROJ_PATH"
           echo "PROJECT_PATH=$PROJ_PATH" >> $GITHUB_ENV
-          echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> $GITHUB_ENV
 
-      # ----------------------------------------------------
-      # 3. REPAIR SYNTAX IN PROJECT.PBXPROJ
-      # ----------------------------------------------------
-      - name: Repair and Validate Xcode Project Syntax
+      - name: Fix Project Syntax & Missing Quotes
         run: |
-          PBX_FILE="$PROJECT_PATH/project.pbxproj"
-          echo "Inspecting $PBX_FILE..."
+          PBX="$PROJECT_PATH/project.pbxproj"
+          echo "Repairing syntax in $PBX..."
+          python3 -c "import re, sys; p=sys.argv[1]; s=open(p, encoding='utf-8', errors='ignore').read(); open(p,'w', encoding='utf-8').write(re.sub(r'(\b\w+\s*=\s*)([^\";{}\n]+?)(\s*;)', lambda m: f'{m.group(1)}\"{m.group(2).strip()}\"{m.group(3)}' if (' ' in m.group(2) or '(' in m.group(2)) and not m.group(2).strip().startswith('\"') else m.group(0), s))" "$PBX"
+          plutil -lint "$PBX" || true
 
-          if [ ! -f "$PBX_FILE" ]; then
-            echo "::error::$PBX_FILE not found!"
-            exit 1
-          fi
-
-          python3 - << 'EOF' "$PBX_FILE"
-          import sys, re
-
-          pbx_path = sys.argv[1]
-          with open(pbx_path, 'r', encoding='utf-8', errors='ignore') as f:
-              lines = f.readlines()
-
-          pattern = r'(\b\w+\s*=\s*)([^\";{}\n]+?)(\s*(?:/\*.*?\*/\s*)?;)'
-
-          def quote_unquoted(m):
-              prefix = m.group(1)
-              v = m.group(2).strip()
-              suffix = m.group(3)
-              if '/*' in v and v.endswith('*/'):
-                  idx = v.find('/*')
-                  comment = ' ' + v[idx:]
-                  v = v[:idx].strip()
-                  suffix = comment + suffix
-              if (' ' in v or '(' in v or ')' in v) and not (v.startswith('"') and v.endswith('"')):
-                  return f'{prefix}"{v}"{suffix}'
-              return m.group(0)
-
-          modified = False
-          new_lines = []
-          for i, line in enumerate(lines):
-              s = line.strip()
-
-              if s.startswith(('<<<<<<<', '=======', '>>>>>>>')):
-                  modified = True
-                  continue
-
-              fixed_line = re.sub(pattern, quote_unquoted, line)
-              if fixed_line != line:
-                  line = fixed_line
-                  s = line.strip()
-                  modified = True
-
-              if '=' in s and not s.startswith(('//', '/*')) and not s.endswith((';', '{', '(', ',')):
-                  indent = line[:len(line) - len(line.lstrip())]
-                  comment = ''
-                  val_part = s
-                  if '/*' in s and s.endswith('*/'):
-                      c_idx = s.find('/*')
-                      comment = ' ' + s[c_idx:]
-                      val_part = s[:c_idx].strip()
-                  line = f"{indent}{val_part};{comment}\n"
-                  modified = True
-
-              elif s == '}' and i < len(lines) - 2:
-                  indent = line[:len(line) - len(line.lstrip())]
-                  line = f"{indent}}};\n"
-                  modified = True
-
-              new_lines.append(line)
-
-          if modified:
-              with open(pbx_path, 'w', encoding='utf-8') as f:
-                  f.writelines(new_lines)
-              print("Successfully auto-repaired project.pbxproj syntax!")
-          EOF
-
-          plutil -lint "$PBX_FILE" || true
-
-      # ----------------------------------------------------
-      # 4. SYNC PATCH RESOURCE FILES
-      # ----------------------------------------------------
       - name: Sync Patch Resource Files
         run: |
-          echo "Syncing patch resource files in Patches folders..."
-          python3 - << 'EOF'
-          import os, shutil
-
-          for root, dirs, files in os.walk('.'):
-              if os.path.basename(root) == 'Patches':
-                  print(f"Checking Patches folder: {root}")
-                  for f in list(files):
-                      if 'FOUGO File' in f and 'EXTERNAL' not in f:
-                          ext_name = f.replace('FOUGO File', 'FOUGO EXTERNAL File')
-                          src = os.path.join(root, f)
-                          dst = os.path.join(root, ext_name)
-                          if not os.path.exists(dst):
-                              shutil.copyfile(src, dst)
-                      elif 'FOUGO EXTERNAL File' in f:
-                          base_name = f.replace('FOUGO EXTERNAL File', 'FOUGO File')
-                          src = os.path.join(root, f)
-                          dst = os.path.join(root, base_name)
-                          if not os.path.exists(dst):
-                              shutil.copyfile(src, dst)
-          EOF
-
-      # ----------------------------------------------------
-      # 5. FIX APP ICON DIMENSIONS (1254x1254 -> 1024x1024)
-      # ----------------------------------------------------
-      - name: Fix AppIcon Dimensions & Assets
-        run: |
-          echo "Resizing AppIcon images to exact 1024x1024..."
-          find . -name "AppIcon.appiconset" -type d | while read -r iconset; do
-            echo "Processing: $iconset"
-
-            # Resize any image in AppIcon to exact 1024x1024 pixels using macOS sips
-            find "$iconset" -name "*.png" | while read -r img; do
-              echo "==> Resizing $img to 1024x1024..."
-              sips -z 1024 1024 "$img"
+          find . -type d -name "Patches" | while read -r pdir; do
+            echo "Syncing patch assets in $pdir..."
+            for f in "$pdir"/"FOUGO File "*; do
+              if [ -f "$f" ]; then
+                cp -f "$f" "${f/FOUGO File/FOUGO EXTERNAL File}"
+              fi
             done
-
-            # Write clean single-size universal 1024x1024 Contents.json
-            cat << 'EOF' > "$iconset/Contents.json"
-{
-  "images" : [
-    {
-      "size" : "1024x1024",
-      "idiom" : "universal",
-      "filename" : "AppIcon-1024.png",
-      "platform" : "ios"
-    }
-  ],
-  "info" : {
-    "version" : 1,
-    "author" : "xcode"
-  }
-}
-EOF
-            echo "Updated $iconset/Contents.json"
           done
 
-      # ----------------------------------------------------
-      # 6. SELECT XCODE & VERIFY SCHEME
-      # ----------------------------------------------------
-      - name: Select Xcode 15.4
+      - name: Fix AppIcon Dimensions to 1024x1024
+        run: |
+          find . -path "*/AppIcon.appiconset/*.png" -exec sips -z 1024 1024 {} + || true
+
+      - name: Select Xcode Version
         run: |
           if [ -d "/Applications/Xcode_15.4.app" ]; then
             sudo xcode-select -s "/Applications/Xcode_15.4.app/Contents/Developer"
-          elif [ -d "/Applications/Xcode.app" ]; then
-            sudo xcode-select -s "/Applications/Xcode.app/Contents/Developer"
           fi
           xcodebuild -version
 
-      - name: Verify Scheme & Project
+      - name: Compile with xcodebuild
         run: |
-          xcodebuild -list -project "$PROJECT_PATH"
-
-      # ----------------------------------------------------
-      # 7. COMPILE APPLICATION
-      # ----------------------------------------------------
-      - name: Compile Application with xcodebuild
-        run: |
-          BUILD_CONFIG="${{ github.event.inputs.build_configuration || 'Release' }}"
-          echo "Compiling scheme FOUGO using $PROJECT_PATH in $BUILD_CONFIG mode..."
-
           xcodebuild clean build \
             -project "$PROJECT_PATH" \
             -scheme "FOUGO" \
-            -configuration "$BUILD_CONFIG" \
+            -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
@@ -249,31 +79,20 @@ EOF
             CODE_SIGN_IDENTITY="" \
             AD_HOC_CODE_SIGNING_ALLOWED=YES
 
-      # ----------------------------------------------------
-      # 8. PACKAGE INTO IPA & UPLOAD
-      # ----------------------------------------------------
       - name: Package .app into .ipa
         run: |
-          echo "Locating compiled .app bundle..."
           APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
-
           if [ -z "$APP_PATH" ]; then
-            echo "::error::No .app bundle found in build products!"
-            find build -maxdepth 5 || true
+            echo "::error::No .app found!"
             exit 1
           fi
-
-          echo "Found application bundle at: $APP_PATH"
-
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
           zip -vr FOUGO.ipa Payload
           rm -rf Payload
-
-          echo "Generated IPA successfully:"
           ls -lh FOUGO.ipa
 
-      - name: Upload IPA as GitHub Artifact
+      - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: FOUGO-Unsigned-IPA
