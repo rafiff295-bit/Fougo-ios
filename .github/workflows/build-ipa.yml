@@ -1,13 +1,10 @@
 name: Build FOUGO IPA
 
 on:
-  # Trigger automatically when pushing to main or master
   push:
     branches: [ "main", "master" ]
-  # Trigger on Pull Requests
   pull_request:
     branches: [ "main", "master" ]
-  # Allow manual trigger with optional Release/Debug selector
   workflow_dispatch:
     inputs:
       build_configuration:
@@ -22,7 +19,7 @@ on:
 jobs:
   build-ipa:
     name: Build Unsigned iOS IPA
-    runs-on: macos-14 # Apple Silicon M1 runner with Xcode 15+
+    runs-on: macos-14
 
     steps:
       - name: Checkout Source Code
@@ -33,8 +30,7 @@ jobs:
 
       - name: Select Xcode 15.4
         run: |
-          echo "Available Xcode installations:"
-          ls -d /Applications/Xcode*
+          echo "Selecting Xcode version..."
           if [ -d "/Applications/Xcode_15.4.app" ]; then
             sudo xcode-select -s "/Applications/Xcode_15.4.app/Contents/Developer"
           elif [ -d "/Applications/Xcode.app" ]; then
@@ -42,17 +38,41 @@ jobs:
           fi
           xcodebuild -version
 
+      - name: Locate Xcode Project
+        id: find-project
+        run: |
+          echo "Scanning repository directory structure..."
+          ls -la
+
+          # Find ThreeOneOSFive.xcodeproj anywhere in the repo
+          PROJ_PATH=$(find . -name "ThreeOneOSFive.xcodeproj" -type d | head -n 1)
+
+          # Fallback to any .xcodeproj if renamed
+          if [ -z "$PROJ_PATH" ]; then
+            PROJ_PATH=$(find . -name "*.xcodeproj" -type d | head -n 1)
+          fi
+
+          if [ -z "$PROJ_PATH" ]; then
+            echo "::error::Could not find any .xcodeproj directory in the repository!"
+            find . -maxdepth 3
+            exit 1
+          fi
+
+          echo "Found project at: $PROJ_PATH"
+          echo "PROJECT_PATH=$PROJ_PATH" >> $GITHUB_ENV
+          echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> $GITHUB_ENV
+
       - name: Verify Scheme & Project
         run: |
-          xcodebuild -list -project "ThreeOneOSFive.xcodeproj"
+          xcodebuild -list -project "$PROJECT_PATH"
 
       - name: Compile Application with xcodebuild
         run: |
           BUILD_CONFIG="${{ github.event.inputs.build_configuration || 'Release' }}"
-          echo "Building scheme FOUGO in $BUILD_CONFIG mode..."
+          echo "Building scheme FOUGO using $PROJECT_PATH in $BUILD_CONFIG mode..."
 
           xcodebuild clean build \
-            -project "ThreeOneOSFive.xcodeproj" \
+            -project "$PROJECT_PATH" \
             -scheme "FOUGO" \
             -configuration "$BUILD_CONFIG" \
             -sdk iphoneos \
@@ -70,24 +90,21 @@ jobs:
 
           if [ -z "$APP_PATH" ]; then
             echo "::error::No .app bundle found in build products!"
+            find build -maxdepth 5 || true
             exit 1
           fi
 
-          echo "Found app at: $APP_PATH"
+          echo "Found application bundle at: $APP_PATH"
 
-          # 1. Create the Payload directory required by iOS IPA specification
+          # Create Payload directory required by iOS IPA specification
           mkdir -p Payload
-          
-          # 2. Copy the .app bundle into Payload/
           cp -r "$APP_PATH" Payload/
 
-          # 3. Zip into FOUGO.ipa
+          # Compress into FOUGO.ipa
           zip -vr FOUGO.ipa Payload
-
-          # 4. Clean up temporary directory
           rm -rf Payload
 
-          echo "Successfully created FOUGO.ipa:"
+          echo "Generated IPA successfully:"
           ls -lh FOUGO.ipa
 
       - name: Upload IPA as GitHub Artifact
