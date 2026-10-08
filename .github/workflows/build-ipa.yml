@@ -34,7 +34,7 @@ jobs:
           fetch-depth: 0
 
       # ----------------------------------------------------
-      # 1. EXTRACT ZIP (HANDLES SPACES IN FILENAMES)
+      # 1. SAFELY UNZIP (HANDLES SPACES IN ZIP NAME)
       # ----------------------------------------------------
       - name: Auto-Extract Zip Files
         run: |
@@ -76,12 +76,12 @@ jobs:
           echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> $GITHUB_ENV
 
       # ----------------------------------------------------
-      # 3. AUTO-REPAIR MISSING SEMICOLON IN PROJECT.PBXPROJ
+      # 3. AUTO-REPAIR LINE 353 IN PROJECT.PBXPROJ
       # ----------------------------------------------------
       - name: Repair and Validate Xcode Project Syntax
         run: |
           PBX_FILE="$PROJECT_PATH/project.pbxproj"
-          echo "Checking $PBX_FILE for syntax errors..."
+          echo "Inspecting $PBX_FILE for syntax errors..."
 
           if [ ! -f "$PBX_FILE" ]; then
             echo "::error::$PBX_FILE not found!"
@@ -93,7 +93,7 @@ jobs:
           echo "============================================"
 
           python3 - << 'EOF' "$PBX_FILE"
-          import sys, re
+          import sys
 
           pbx_path = sys.argv[1]
           with open(pbx_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -104,32 +104,46 @@ jobs:
           for i, line in enumerate(lines):
               s = line.strip()
               
-              # Remove git conflict markers
+              # 1. Strip git merge conflict markers
               if s.startswith(('<<<<<<<', '=======', '>>>>>>>')):
-                  print(f"Removing merge conflict marker at line {i+1}: {s}")
+                  print(f"Removing conflict marker at line {i+1}: {s}")
                   modified = True
                   continue
-              
-              # Fix missing semicolon on assignments: key = value
-              if '=' in s and not s.startswith(('//', '/*')) and not s.endswith((';', '{', '(', ',')):
-                  comment_match = re.search(r'/\*.*?\*/\s*$', s)
-                  if comment_match:
-                      before_comment = s[:comment_match.start()].rstrip()
-                      if not before_comment.endswith(';'):
-                          indent = line[:len(line) - len(line.lstrip())]
-                          new_line = f"{indent}{before_comment}; {s[comment_match.start():]}\n"
-                          print(f"Auto-fixing line {i+1}: {s} -> {new_line.strip()}")
-                          line = new_line
-                          modified = True
-                  else:
-                      print(f"Auto-fixing missing semicolon at line {i+1}: {s}")
-                      line = line.rstrip('\r\n') + ';\n'
+
+              # 2. Fix unquoted paths containing spaces or parentheses (e.g. FOUGO File (9).3105;)
+              if '=' in s and ';' in s and not s.startswith(('//', '/*')):
+                  before, after = line.split('=', 1)
+                  val, rest = after.rsplit(';', 1)
+                  v = val.strip()
+                  comment = ''
+                  if '/*' in v and v.endswith('*/'):
+                      c_idx = v.find('/*')
+                      comment = ' ' + v[c_idx:]
+                      v = v[:c_idx].strip()
+                  
+                  if (' ' in v or '(' in v or ')' in v) and not (v.startswith('"') and v.endswith('"')):
+                      line = f"{before}= \"{v}\"{comment};{rest}"
+                      print(f"Auto-quoting value at line {i+1}: {s} -> {line.strip()}")
                       modified = True
 
-              # Fix missing semicolon on closing brace
+              # 3. Fix missing semicolon on assignments
+              elif '=' in s and not s.startswith(('//', '/*')) and not s.endswith((';', '{', '(', ',')):
+                  indent = line[:len(line) - len(line.lstrip())]
+                  comment = ''
+                  val_part = s
+                  if '/*' in s and s.endswith('*/'):
+                      c_idx = s.find('/*')
+                      comment = ' ' + s[c_idx:]
+                      val_part = s[:c_idx].strip()
+                  line = f"{indent}{val_part};{comment}\n"
+                  print(f"Auto-fixing missing semicolon at line {i+1}: {s} -> {line.strip()}")
+                  modified = True
+
+              # 4. Fix missing semicolon on closing brace '}' -> '};'
               elif s == '}' and i < len(lines) - 2:
+                  indent = line[:len(line) - len(line.lstrip())]
+                  line = f"{indent}}};\n"
                   print(f"Auto-fixing closing brace at line {i+1}: '}}' -> '}};'")
-                  line = line.rstrip('\r\n') + ';\n'
                   modified = True
 
               new_lines.append(line)
@@ -139,10 +153,10 @@ jobs:
                   f.writelines(new_lines)
               print("Successfully auto-repaired project.pbxproj syntax!")
           else:
-              print("No missing semicolons detected by regex scanner.")
+              print("No syntax anomalies detected.")
           EOF
 
-          echo "Validating syntax with macOS plutil..."
+          echo "Validating plist with macOS plutil..."
           plutil -lint "$PBX_FILE" || true
 
       # ----------------------------------------------------
@@ -186,7 +200,7 @@ jobs:
       # ----------------------------------------------------
       - name: Package .app into .ipa
         run: |
-          echo "Locating compiled .app bundle..."
+          echo "Searching for compiled .app bundle..."
           APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
 
           if [ -z "$APP_PATH" ]; then
