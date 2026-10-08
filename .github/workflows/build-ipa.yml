@@ -152,7 +152,7 @@ jobs:
           plutil -lint "$PBX_FILE" || true
 
       # ----------------------------------------------------
-      # 4. SYNC PATCH RESOURCE FILES (FIXES EXIT CODE 65)
+      # 4. SYNC PATCH RESOURCE FILES
       # ----------------------------------------------------
       - name: Sync Patch Resource Files
         run: |
@@ -164,26 +164,57 @@ jobs:
               if os.path.basename(root) == 'Patches':
                   print(f"Checking Patches folder: {root}")
                   for f in list(files):
-                      # Create 'FOUGO EXTERNAL File (...)' from 'FOUGO File (...)'
                       if 'FOUGO File' in f and 'EXTERNAL' not in f:
                           ext_name = f.replace('FOUGO File', 'FOUGO EXTERNAL File')
                           src = os.path.join(root, f)
                           dst = os.path.join(root, ext_name)
                           if not os.path.exists(dst):
                               shutil.copyfile(src, dst)
-                              print(f"Created: {ext_name}")
-                      # Create 'FOUGO File (...)' from 'FOUGO EXTERNAL File (...)'
                       elif 'FOUGO EXTERNAL File' in f:
                           base_name = f.replace('FOUGO EXTERNAL File', 'FOUGO File')
                           src = os.path.join(root, f)
                           dst = os.path.join(root, base_name)
                           if not os.path.exists(dst):
                               shutil.copyfile(src, dst)
-                              print(f"Created: {base_name}")
           EOF
 
       # ----------------------------------------------------
-      # 5. SELECT XCODE & VERIFY SCHEME
+      # 5. FIX APP ICON DIMENSIONS (1254x1254 -> 1024x1024)
+      # ----------------------------------------------------
+      - name: Fix AppIcon Dimensions & Assets
+        run: |
+          echo "Resizing AppIcon images to exact 1024x1024..."
+          find . -name "AppIcon.appiconset" -type d | while read -r iconset; do
+            echo "Processing: $iconset"
+
+            # Resize any image in AppIcon to exact 1024x1024 pixels using macOS sips
+            find "$iconset" -name "*.png" | while read -r img; do
+              echo "==> Resizing $img to 1024x1024..."
+              sips -z 1024 1024 "$img"
+            done
+
+            # Write clean single-size universal 1024x1024 Contents.json
+            cat << 'EOF' > "$iconset/Contents.json"
+{
+  "images" : [
+    {
+      "size" : "1024x1024",
+      "idiom" : "universal",
+      "filename" : "AppIcon-1024.png",
+      "platform" : "ios"
+    }
+  ],
+  "info" : {
+    "version" : 1,
+    "author" : "xcode"
+  }
+}
+EOF
+            echo "Updated $iconset/Contents.json"
+          done
+
+      # ----------------------------------------------------
+      # 6. SELECT XCODE & VERIFY SCHEME
       # ----------------------------------------------------
       - name: Select Xcode 15.4
         run: |
@@ -199,7 +230,7 @@ jobs:
           xcodebuild -list -project "$PROJECT_PATH"
 
       # ----------------------------------------------------
-      # 6. COMPILE APPLICATION
+      # 7. COMPILE APPLICATION
       # ----------------------------------------------------
       - name: Compile Application with xcodebuild
         run: |
@@ -219,7 +250,7 @@ jobs:
             AD_HOC_CODE_SIGNING_ALLOWED=YES
 
       # ----------------------------------------------------
-      # 7. PACKAGE INTO IPA & UPLOAD
+      # 8. PACKAGE INTO IPA & UPLOAD
       # ----------------------------------------------------
       - name: Package .app into .ipa
         run: |
