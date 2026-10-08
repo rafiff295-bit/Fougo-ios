@@ -27,14 +27,14 @@ jobs:
 
       - name: Extract Zip Files
         run: |
-          # 1. Download from direct URL if provided in workflow_dispatch
+          # 1. Download from direct URL if supplied in workflow_dispatch
           ZIP_URL="${{ github.event.inputs.zip_url }}"
           if [ -n "$ZIP_URL" ]; then
             echo "Downloading ZIP archive from: $ZIP_URL"
             curl -L -f -o downloaded_archive.zip "$ZIP_URL"
           fi
 
-          # 2. Extract zip archives safely (handling spaces in filenames)
+          # 2. Extract any zip files in the repo safely (handling spaces in filenames)
           find . -maxdepth 2 -name "*.zip" -type f | while IFS= read -r f; do
             echo "Unzipping archive: $f"
             unzip -q -o "$f"
@@ -57,7 +57,7 @@ jobs:
         run: |
           PBX="$PROJECT_PATH/project.pbxproj"
           echo "Repairing syntax in $PBX..."
-          python3 -c "
+          python3 -c "import sys, textwrap; exec(textwrap.dedent('''
           import re, sys
           p = sys.argv[1]
           with open(p, 'r', encoding='utf-8', errors='ignore') as f:
@@ -71,7 +71,7 @@ jobs:
                   if (' ' in v or '(' in v or ')' in v) and not v.startswith('\"'):
                       v = f'\"{v}\"'
                   return f'{k}{v}{s}'
-              line = re.sub(r'(\b\w+\s*=\s*)([^\";{}\n]+?)(\s*;|\s*$)', quote_val, line)
+              line = re.sub(r'(\\b\\w+\\s*=\\s*)([^\\\"{}\\n]+?)(\\s*;|\\s*$)', quote_val, line)
               st = line.strip()
               if st and not st.startswith('//') and not st.startswith('/*'):
                   if st.endswith('}') and not st.endswith('};'):
@@ -80,8 +80,8 @@ jobs:
                       line = line + ';'
               repaired.append(line)
           with open(p, 'w', encoding='utf-8') as f:
-              f.write('\n'.join(repaired) + '\n')
-          " "$PBX"
+              f.write('\\n'.join(repaired) + '\\n')
+          '''))" "$PBX"
           plutil -lint "$PBX" || true
 
       - name: Sync Patch Resource Files
@@ -103,57 +103,14 @@ jobs:
         run: |
           find . -name "ContentView.swift" | while read -r cv; do
             echo "Verifying Swift helpers in $cv..."
-            PATCH=""
             if ! grep -q "func statusRow" "$cv" && ! grep -q "var statusRow" "$cv"; then
-              PATCH="$PATCH
-@ViewBuilder
-func statusRow(icon: String, title: String, value: String, color: Color) -> some View {
-  HStack {
-    Label(title, systemImage: icon).font(.subheadline)
-    Spacer()
-    Text(value).font(.caption).fontWeight(.bold).foregroundColor(color)
-  }
-}
-"
+              printf '\nimport SwiftUI\n\n@ViewBuilder\nfunc statusRow(icon: String, title: String, value: String, color: Color) -> some View {\n  HStack {\n    Label(title, systemImage: icon).font(.subheadline)\n    Spacer()\n    Text(value).font(.caption).fontWeight(.bold)\n  }\n}\n' >> "$cv"
             fi
             if ! grep -q "func panelTitle" "$cv" && ! grep -q "var panelTitle" "$cv"; then
-              PATCH="$PATCH
-@ViewBuilder
-func panelTitle(_ title: String, icon: String) -> some View {
-  HStack(spacing: 6) {
-    Image(systemName: icon).font(.system(size: 13, weight: .semibold))
-    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)
-  }
-}
-"
+              printf '\n@ViewBuilder\nfunc panelTitle(_ title: String, icon: String) -> some View {\n  HStack(spacing: 6) {\n    Image(systemName: icon).font(.system(size: 13, weight: .semibold))\n    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)\n  }\n}\n' >> "$cv"
             fi
             if ! grep -q "developerCredits" "$cv"; then
-              if grep -E -q "developerCredits\s*\(" "$cv"; then
-                PATCH="$PATCH
-@ViewBuilder
-func developerCredits() -> some View {
-  HStack {
-    Text(\"FOUGO Developer\").font(.caption).foregroundColor(.secondary)
-  }
-}
-"
-              else
-                PATCH="$PATCH
-@ViewBuilder
-var developerCredits: some View {
-  HStack {
-    Text(\"FOUGO Developer\").font(.caption).foregroundColor(.secondary)
-  }
-}
-"
-              fi
-            fi
-
-            if [ -n "$PATCH" ]; then
-              printf "\n\nimport SwiftUI\n$PATCH\n" >> "$cv"
-              echo "Appended missing Swift helpers to $cv"
-            else
-              echo "No Swift helper patches needed for $cv"
+              printf '\n@ViewBuilder\nvar developerCredits: some View {\n  HStack {\n    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)\n  }\n}\n' >> "$cv"
             fi
           done
 
@@ -163,7 +120,7 @@ var developerCredits: some View {
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           sudo mkdir -p "$SDK_PATH/usr/include/sys"
           printf '#ifndef _SYS_FILEPORT_H_\n#define _SYS_FILEPORT_H_\n#include <sys/cdefs.h>\n#include <sys/types.h>\n#include <mach/mach_types.h>\n#define FILEPORT_NULL 0\ntypedef mach_port_t fileport_t;\n__BEGIN_DECLS\nint fileport_makeport(int fd, fileport_t *port);\nint fileport_makefd(fileport_t port);\n__END_DECLS\n#endif\n' | sudo tee "$SDK_PATH/usr/include/sys/fileport.h" > /dev/null
-          
+
           mkdir -p include/sys
           printf '#ifndef _SYS_FILEPORT_H_\n#define _SYS_FILEPORT_H_\n#include <sys/cdefs.h>\n#include <sys/types.h>\n#include <mach/mach_types.h>\n#define FILEPORT_NULL 0\ntypedef mach_port_t fileport_t;\n__BEGIN_DECLS\nint fileport_makeport(int fd, fileport_t *port);\nint fileport_makefd(fileport_t port);\n__END_DECLS\n#endif\n' > include/sys/fileport.h
           find . -type d -name "kexploit" | while read -r kdir; do
