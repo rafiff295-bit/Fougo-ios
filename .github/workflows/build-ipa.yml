@@ -1,0 +1,99 @@
+name: Build FOUGO IPA
+
+on:
+  # Trigger automatically when pushing to main or master
+  push:
+    branches: [ "main", "master" ]
+  # Trigger on Pull Requests
+  pull_request:
+    branches: [ "main", "master" ]
+  # Allow manual trigger with optional Release/Debug selector
+  workflow_dispatch:
+    inputs:
+      build_configuration:
+        description: 'Build Configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Debug
+
+jobs:
+  build-ipa:
+    name: Build Unsigned iOS IPA
+    runs-on: macos-14 # Apple Silicon M1 runner with Xcode 15+
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Select Xcode 15.4
+        run: |
+          echo "Available Xcode installations:"
+          ls -d /Applications/Xcode*
+          if [ -d "/Applications/Xcode_15.4.app" ]; then
+            sudo xcode-select -s "/Applications/Xcode_15.4.app/Contents/Developer"
+          elif [ -d "/Applications/Xcode.app" ]; then
+            sudo xcode-select -s "/Applications/Xcode.app/Contents/Developer"
+          fi
+          xcodebuild -version
+
+      - name: Verify Scheme & Project
+        run: |
+          xcodebuild -list -project "ThreeOneOSFive.xcodeproj"
+
+      - name: Compile Application with xcodebuild
+        run: |
+          BUILD_CONFIG="${{ github.event.inputs.build_configuration || 'Release' }}"
+          echo "Building scheme FOUGO in $BUILD_CONFIG mode..."
+
+          xcodebuild clean build \
+            -project "ThreeOneOSFive.xcodeproj" \
+            -scheme "FOUGO" \
+            -configuration "$BUILD_CONFIG" \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES
+
+      - name: Package .app into .ipa
+        run: |
+          echo "Searching for compiled .app bundle..."
+          APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
+
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No .app bundle found in build products!"
+            exit 1
+          fi
+
+          echo "Found app at: $APP_PATH"
+
+          # 1. Create the Payload directory required by iOS IPA specification
+          mkdir -p Payload
+          
+          # 2. Copy the .app bundle into Payload/
+          cp -r "$APP_PATH" Payload/
+
+          # 3. Zip into FOUGO.ipa
+          zip -vr FOUGO.ipa Payload
+
+          # 4. Clean up temporary directory
+          rm -rf Payload
+
+          echo "Successfully created FOUGO.ipa:"
+          ls -lh FOUGO.ipa
+
+      - name: Upload IPA as GitHub Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FOUGO-Unsigned-IPA
+          path: FOUGO.ipa
+          if-no-files-found: error
+          retention-days: 14
