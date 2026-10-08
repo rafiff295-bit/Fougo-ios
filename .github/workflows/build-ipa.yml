@@ -7,6 +7,11 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
     inputs:
+      zip_url:
+        description: 'Optional: Direct download URL to source .zip (leave empty if zip is uploaded to repo)'
+        required: false
+        default: ''
+        type: string
       build_configuration:
         description: 'Build Configuration'
         required: true
@@ -22,45 +27,73 @@ jobs:
     runs-on: macos-14
 
     steps:
-      - name: Checkout Source Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
+      # ----------------------------------------------------
+      # AUTO-EXTRACT ZIP FILES OR DOWNLOAD FROM URL
+      # ----------------------------------------------------
+      - name: Auto-Extract Zip Files
+        run: |
+          echo "Checking for zip files..."
+
+          # 1. Download zip from URL if provided in manual trigger
+          ZIP_URL="${{ github.event.inputs.zip_url }}"
+          if [ -n "$ZIP_URL" ]; then
+            echo "Downloading ZIP from: $ZIP_URL"
+            curl -L -o downloaded_source.zip "$ZIP_URL"
+          fi
+
+          # 2. Find and extract any .zip file in the repository
+          ZIP_FILES=$(find . -maxdepth 2 -name "*.zip" -type f)
+          if [ -n "$ZIP_FILES" ]; then
+            echo "Found zip file(s):"
+            echo "$ZIP_FILES"
+            for z in $ZIP_FILES; do
+              echo "==> Unzipping $z..."
+              unzip -q -o "$z"
+            done
+            echo "Unzip complete."
+          else
+            echo "No .zip files found. Using checked-out files."
+          fi
+
+      # ----------------------------------------------------
+      # AUTOMATICALLY LOCATE .XCODEPROJ IN EXTRACTED FOLDERS
+      # ----------------------------------------------------
+      - name: Locate Xcode Project
+        id: find-project
+        run: |
+          echo "Scanning workspace for project..."
+
+          PROJ_PATH=$(find . -name "ThreeOneOSFive.xcodeproj" -type d | head -n 1)
+
+          if [ -z "$PROJ_PATH" ]; then
+            PROJ_PATH=$(find . -name "*.xcodeproj" -type d | head -n 1)
+          fi
+
+          if [ -z "$PROJ_PATH" ]; then
+            echo "::error::Could not find any .xcodeproj directory!"
+            echo "Files in workspace:"
+            ls -la
+            exit 1
+          fi
+
+          echo "Found Xcode project at: $PROJ_PATH"
+          echo "PROJECT_PATH=$PROJ_PATH" >> $GITHUB_ENV
+          echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> $GITHUB_ENV
+
       - name: Select Xcode 15.4
         run: |
-          echo "Selecting Xcode version..."
           if [ -d "/Applications/Xcode_15.4.app" ]; then
             sudo xcode-select -s "/Applications/Xcode_15.4.app/Contents/Developer"
           elif [ -d "/Applications/Xcode.app" ]; then
             sudo xcode-select -s "/Applications/Xcode.app/Contents/Developer"
           fi
           xcodebuild -version
-
-      - name: Locate Xcode Project
-        id: find-project
-        run: |
-          echo "Scanning repository directory structure..."
-          ls -la
-
-          # Find ThreeOneOSFive.xcodeproj anywhere in the repo
-          PROJ_PATH=$(find . -name "ThreeOneOSFive.xcodeproj" -type d | head -n 1)
-
-          # Fallback to any .xcodeproj if renamed
-          if [ -z "$PROJ_PATH" ]; then
-            PROJ_PATH=$(find . -name "*.xcodeproj" -type d | head -n 1)
-          fi
-
-          if [ -z "$PROJ_PATH" ]; then
-            echo "::error::Could not find any .xcodeproj directory in the repository!"
-            find . -maxdepth 3
-            exit 1
-          fi
-
-          echo "Found project at: $PROJ_PATH"
-          echo "PROJECT_PATH=$PROJ_PATH" >> $GITHUB_ENV
-          echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> $GITHUB_ENV
 
       - name: Verify Scheme & Project
         run: |
@@ -69,7 +102,7 @@ jobs:
       - name: Compile Application with xcodebuild
         run: |
           BUILD_CONFIG="${{ github.event.inputs.build_configuration || 'Release' }}"
-          echo "Building scheme FOUGO using $PROJECT_PATH in $BUILD_CONFIG mode..."
+          echo "Compiling scheme FOUGO using $PROJECT_PATH in $BUILD_CONFIG mode..."
 
           xcodebuild clean build \
             -project "$PROJECT_PATH" \
@@ -96,7 +129,7 @@ jobs:
 
           echo "Found application bundle at: $APP_PATH"
 
-          # Create Payload directory required by iOS IPA specification
+          # Create Payload directory structure
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
 
