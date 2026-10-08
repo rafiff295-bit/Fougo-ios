@@ -58,38 +58,13 @@ jobs:
         run: |
           find . -path "*/AppIcon.appiconset/*.png" -exec sips -z 1024 1024 {} + || true
 
-      # ----------------------------------------------------
-      # FIX MISSING 'panelTitle' IN ContentView.swift
-      # ----------------------------------------------------
-      - name: Patch Missing panelTitle in ContentView.swift
+      - name: Patch Missing panelTitle in ContentView
         run: |
-          echo "Checking for missing panelTitle in ContentView.swift..."
           find . -name "ContentView.swift" | while read -r cv; do
-            if grep -q 'panelTitle(' "$cv" && ! grep -q 'func panelTitle' "$cv"; then
-              echo "Injecting missing panelTitle helper into $cv..."
-              python3 - << 'EOF' "$cv"
-              import sys
-              path = sys.argv[1]
-              with open(path, 'r', encoding='utf-8') as f:
-                  code = f.read()
-
-              helper = """import SwiftUI
-
-@ViewBuilder
-func panelTitle(_ title: String, icon: String) -> some View {
-    HStack(spacing: 6) {
-        Image(systemName: icon)
-            .font(.system(size: 13, weight: .semibold))
-        Text(title)
-            .font(.system(size: 12, weight: .bold))
-            .foregroundColor(.secondary)
-    }
-}
-"""
-              with open(path, 'w', encoding='utf-8') as f:
-                  f.write(helper + "\n" + code)
-              print(f"Injected panelTitle into {path}")
-              EOF
+            if grep -q "panelTitle(" "$cv" && ! grep -q "func panelTitle" "$cv"; then
+              echo "Injecting panelTitle helper into $cv..."
+              printf 'import SwiftUI\n@ViewBuilder\nfunc panelTitle(_ title: String, icon: String) -> some View {\n  HStack(spacing: 6) {\n    Image(systemName: icon).font(.system(size: 13, weight: .semibold))\n    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)\n  }\n}\n' > /tmp/p.swift
+              cat /tmp/p.swift "$cv" > /tmp/cv2.swift && mv /tmp/cv2.swift "$cv"
             fi
           done
 
