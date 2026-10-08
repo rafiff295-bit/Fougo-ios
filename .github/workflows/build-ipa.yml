@@ -3,8 +3,6 @@ name: Build FOUGO IPA
 on:
   push:
     branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
   workflow_dispatch:
     inputs:
       zip_url:
@@ -12,6 +10,14 @@ on:
         required: false
         default: ''
         type: string
+      build_type:
+        description: 'Build Type'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Debug
 
 jobs:
   build-ipa:
@@ -57,31 +63,7 @@ jobs:
         run: |
           PBX="$PROJECT_PATH/project.pbxproj"
           echo "Repairing syntax in $PBX..."
-          python3 -c "import sys, textwrap; exec(textwrap.dedent('''
-          import re, sys
-          p = sys.argv[1]
-          with open(p, 'r', encoding='utf-8', errors='ignore') as f:
-              lines = f.read().splitlines()
-          repaired = []
-          for line in lines:
-              def quote_val(m):
-                  k = m.group(1)
-                  v = m.group(2).strip()
-                  s = m.group(3)
-                  if (' ' in v or '(' in v or ')' in v) and not v.startswith('\"'):
-                      v = f'\"{v}\"'
-                  return f'{k}{v}{s}'
-              line = re.sub(r'(\\b\\w+\\s*=\\s*)([^\\\"{}\\n]+?)(\\s*;|\\s*$)', quote_val, line)
-              st = line.strip()
-              if st and not st.startswith('//') and not st.startswith('/*'):
-                  if st.endswith('}') and not st.endswith('};'):
-                      line = line + ';'
-                  elif '=' in st and not st.endswith(';') and not st.endswith('{'):
-                      line = line + ';'
-              repaired.append(line)
-          with open(p, 'w', encoding='utf-8') as f:
-              f.write('\\n'.join(repaired) + '\\n')
-          '''))" "$PBX"
+          python3 -c "import base64, sys; exec(base64.b64decode('aW1wb3J0IHN5cywgcmUKCnAgPSBzeXMuYXJndlsxXQp3aXRoIG9wZW4ocCwgJ3InLCBlbmNvZGluZz0ndXRmLTgnLCBlcnJvcnM9J2lnbm9yZScpIGFzIGY6CiAgICBsaW5lcyA9IGYucmVhZCgpLnNwbGl0bGluZXMoKQoKcmVwYWlyZWQgPSBbXQpmb3IgbGluZSBpbiBsaW5lczoKICAgIGRlZiBxdW90ZV92YWwobSk6CiAgICAgICAgayA9IG0uZ3JvdXAoMSkKICAgICAgICB2ID0gbS5ncm91cCgyKS5zdHJpcCgpCiAgICAgICAgcyA9IG0uZ3JvdXAoMykKICAgICAgICBpZiAoJyAnIGluIHYgb3IgJygnIGluIHYgb3IgJyknIGluIHYpIGFuZCBub3Qgdi5zdGFydHN3aXRoKCciJyk6CiAgICAgICAgICAgIHYgPSBmJyJ7dn0iJwogICAgICAgIHJldHVybiBmJ3trfXt2fXtzfScKICAgIGxpbmUgPSByZS5zdWIocicoCFx3K1xzKj1ccyopKFteInt9Cl0rPykoXHMqO3xccyokKScsIHF1b3RlX3ZhbCwgbGluZSkKICAgIHN0ID0gbGluZS5zdHJpcCgpCiAgICBpZiBzdCBhbmQgbm90IHN0LnN0YXJ0c3dpdGgoJy8vJykgYW5kIG5vdCBzdC5zdGFydHN3aXRoKCcvKicpOgogICAgICAgIGlmIHN0LmVuZHN3aXRoKCd9JykgYW5kIG5vdCBzdC5lbmRzd2l0aCgnfTsnKToKICAgICAgICAgICAgbGluZSA9IGxpbmUgKyAnOycKICAgICAgICBlbGlmICc9JyBpbiBzdCBhbmQgbm90IHN0LmVuZHN3aXRoKCc7JykgYW5kIG5vdCBzdC5lbmRzd2l0aCgneycpOgogICAgICAgICAgICBsaW5lID0gbGluZSArICc7JwogICAgcmVwYWlyZWQuYXBwZW5kKGxpbmUpCgp3aXRoIG9wZW4ocCwgJ3cnLCBlbmNvZGluZz0ndXRmLTgnKSBhcyBmOgogICAgZi53cml0ZSgnCicuam9pbihyZXBhaXJlZCkgKyAnCicpCg==').decode('utf-8'))" "$PBX"
           plutil -lint "$PBX" || true
 
       - name: Sync Patch Resource Files
@@ -104,13 +86,39 @@ jobs:
           find . -name "ContentView.swift" | while read -r cv; do
             echo "Verifying Swift helpers in $cv..."
             if ! grep -q "func statusRow" "$cv" && ! grep -q "var statusRow" "$cv"; then
-              printf '\nimport SwiftUI\n\n@ViewBuilder\nfunc statusRow(icon: String, title: String, value: String, color: Color) -> some View {\n  HStack {\n    Label(title, systemImage: icon).font(.subheadline)\n    Spacer()\n    Text(value).font(.caption).fontWeight(.bold)\n  }\n}\n' >> "$cv"
+              printf '
+import SwiftUI
+
+@ViewBuilder
+func statusRow(icon: String, title: String, value: String, color: Color) -> some View {
+  HStack {
+    Label(title, systemImage: icon).font(.subheadline)
+    Spacer()
+    Text(value).font(.caption).fontWeight(.bold)
+  }
+}
+' >> "$cv"
             fi
             if ! grep -q "func panelTitle" "$cv" && ! grep -q "var panelTitle" "$cv"; then
-              printf '\n@ViewBuilder\nfunc panelTitle(_ title: String, icon: String) -> some View {\n  HStack(spacing: 6) {\n    Image(systemName: icon).font(.system(size: 13, weight: .semibold))\n    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)\n  }\n}\n' >> "$cv"
+              printf '
+@ViewBuilder
+func panelTitle(_ title: String, icon: String) -> some View {
+  HStack(spacing: 6) {
+    Image(systemName: icon).font(.system(size: 13, weight: .semibold))
+    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)
+  }
+}
+' >> "$cv"
             fi
             if ! grep -q "developerCredits" "$cv"; then
-              printf '\n@ViewBuilder\nvar developerCredits: some View {\n  HStack {\n    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)\n  }\n}\n' >> "$cv"
+              printf '
+@ViewBuilder
+var developerCredits: some View {
+  HStack {
+    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)
+  }
+}
+' >> "$cv"
             fi
           done
 
@@ -119,10 +127,34 @@ jobs:
           echo "Providing private sys/fileport.h header for kexploit_opa334..."
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           sudo mkdir -p "$SDK_PATH/usr/include/sys"
-          printf '#ifndef _SYS_FILEPORT_H_\n#define _SYS_FILEPORT_H_\n#include <sys/cdefs.h>\n#include <sys/types.h>\n#include <mach/mach_types.h>\n#define FILEPORT_NULL 0\ntypedef mach_port_t fileport_t;\n__BEGIN_DECLS\nint fileport_makeport(int fd, fileport_t *port);\nint fileport_makefd(fileport_t port);\n__END_DECLS\n#endif\n' | sudo tee "$SDK_PATH/usr/include/sys/fileport.h" > /dev/null
-
+          printf '#ifndef _SYS_FILEPORT_H_
+#define _SYS_FILEPORT_H_
+#include <sys/cdefs.h>
+#include <sys/types.h>
+#include <mach/mach_types.h>
+#define FILEPORT_NULL 0
+typedef mach_port_t fileport_t;
+__BEGIN_DECLS
+int fileport_makeport(int fd, fileport_t *port);
+int fileport_makefd(fileport_t port);
+__END_DECLS
+#endif
+' | sudo tee "$SDK_PATH/usr/include/sys/fileport.h" > /dev/null
+          
           mkdir -p include/sys
-          printf '#ifndef _SYS_FILEPORT_H_\n#define _SYS_FILEPORT_H_\n#include <sys/cdefs.h>\n#include <sys/types.h>\n#include <mach/mach_types.h>\n#define FILEPORT_NULL 0\ntypedef mach_port_t fileport_t;\n__BEGIN_DECLS\nint fileport_makeport(int fd, fileport_t *port);\nint fileport_makefd(fileport_t port);\n__END_DECLS\n#endif\n' > include/sys/fileport.h
+          printf '#ifndef _SYS_FILEPORT_H_
+#define _SYS_FILEPORT_H_
+#include <sys/cdefs.h>
+#include <sys/types.h>
+#include <mach/mach_types.h>
+#define FILEPORT_NULL 0
+typedef mach_port_t fileport_t;
+__BEGIN_DECLS
+int fileport_makeport(int fd, fileport_t *port);
+int fileport_makefd(fileport_t port);
+__END_DECLS
+#endif
+' > include/sys/fileport.h
           find . -type d -name "kexploit" | while read -r kdir; do
             mkdir -p "$kdir/sys"
             cp include/sys/fileport.h "$kdir/sys/fileport.h"
@@ -156,7 +188,7 @@ jobs:
           if [ $BUILD_SUCCESS -ne 0 ]; then
             echo "=========================================="
             echo "::error::CRITICAL COMPILATION ERRORS FOUND:"
-            grep -E "error:|fatal error:|\*\* BUILD FAILED \*\*" xcodebuild.log || true
+            grep -E "error:|fatal error:|** BUILD FAILED **" xcodebuild.log || true
             echo "=========================================="
             exit $BUILD_SUCCESS
           fi
@@ -165,22 +197,19 @@ jobs:
         run: |
           APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "::error::No .app found in build products!"
-            find build -maxdepth 4 || true
+            echo "::error::No .app found!"
             exit 1
           fi
-          echo "Packaging application bundle: $APP_PATH"
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
           zip -vr "FOUGO.ipa" Payload
           rm -rf Payload
-          echo "Successfully generated IPA package:"
           ls -lh "FOUGO.ipa"
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: FOUGO-Unsigned-IPA
-          path: FOUGO.ipa
+          path: "FOUGO.ipa"
           if-no-files-found: error
           retention-days: 14
