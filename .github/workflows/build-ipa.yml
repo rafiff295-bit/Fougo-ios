@@ -82,19 +82,19 @@ jobs:
           fi
           echo "TARGET_SCHEME=$SCHEME" >> "$GITHUB_ENV"
 
-      - name: Repair and Validate Xcode Project Syntax
+      - name: Validate and Repair Xcode Project Syntax
         run: |
           PBX="$PROJECT_PATH/project.pbxproj"
           echo "Checking $PBX syntax..."
           if [ -f "$PBX" ]; then
-            # Quote unquoted file names or paths containing spaces or parentheses (e.g. FOUGO File (1).3105)
-            sed -i '' -E 's/name = ([^";]+ [^";]+);/name = "\1";/g' "$PBX" 2>/dev/null || sed -i -E 's/name = ([^";]+ [^";]+);/name = "\1";/g' "$PBX" 2>/dev/null || true
-            sed -i '' -E 's/path = ([^";]+ [^";]+);/path = "\1";/g' "$PBX" 2>/dev/null || sed -i -E 's/path = ([^";]+ [^";]+);/path = "\1";/g' "$PBX" 2>/dev/null || true
-            sed -i '' -E 's/name = ([^";]*\([^";]*\)[^";]*);/name = "\1";/g' "$PBX" 2>/dev/null || sed -i -E 's/name = ([^";]*\([^";]*\)[^";]*);/name = "\1";/g' "$PBX" 2>/dev/null || true
-            sed -i '' -E 's/path = ([^";]*\([^";]*\)[^";]*);/path = "\1";/g' "$PBX" 2>/dev/null || sed -i -E 's/path = ([^";]*\([^";]*\)[^";]*);/path = "\1";/g' "$PBX" 2>/dev/null || true
-            sed -i '' 's/""/"/g' "$PBX" 2>/dev/null || sed -i 's/""/"/g' "$PBX" 2>/dev/null || true
-            echo "Linting project file:"
-            plutil -lint "$PBX" || true
+            if plutil -lint "$PBX" 2>&1; then
+              echo "✅ project.pbxproj syntax is completely valid."
+            else
+              echo "⚠️ Initial lint reported issues. Performing safe patch reference quoting..."
+              sed -i '' -E 's/name = (FOUGO File[^;"]+);/name = "\1";/g' "$PBX" 2>/dev/null || sed -i -E 's/name = (FOUGO File[^;"]+);/name = "\1";/g' "$PBX" 2>/dev/null || true
+              sed -i '' -E 's/path = (FOUGO File[^;"]+);/path = "\1";/g' "$PBX" 2>/dev/null || sed -i -E 's/path = (FOUGO File[^;"]+);/path = "\1";/g' "$PBX" 2>/dev/null || true
+              plutil -lint "$PBX" || true
+            fi
           fi
 
       - name: Provide Missing Private Kernel Headers
@@ -123,22 +123,22 @@ jobs:
             sudo cp -f include/sys/fileport.h "$SDK_PATH/usr/include/sys/fileport.h" 2>/dev/null || true
           fi
 
-          find . -type d -name "*kexploit*" | while read -r kdir; do
+          find . -type d -name "*kexploit*" | while IFS= read -r kdir; do
             mkdir -p "$kdir/sys"
             cp -f include/sys/fileport.h "$kdir/sys/fileport.h" 2>/dev/null || true
           done
-          find . -type d -name "*opa334*" | while read -r kdir; do
+          find . -type d -name "*opa334*" | while IFS= read -r kdir; do
             mkdir -p "$kdir/sys"
             cp -f include/sys/fileport.h "$kdir/sys/fileport.h" 2>/dev/null || true
           done
 
       - name: Sync Patch Resource Files
         run: |
-          find . -type d -name "Patches" | while read -r pdir; do
+          find . -type d -name "Patches" | while IFS= read -r pdir; do
             echo "Syncing patch assets in $pdir..."
-            for f in "$pdir"/"FOUGO File "*; do
-              if [ -f "$f" ]; then
-                DEST=$(echo "$f" | sed 's/FOUGO File/FOUGO EXTERNAL File/')
+            for f in "$pdir"/*; do
+              if [ -f "$f" ] && [[ "$f" == *"FOUGO File"* ]]; then
+                DEST="${f/FOUGO File/FOUGO EXTERNAL File}"
                 cp -f "$f" "$DEST" 2>/dev/null || true
               fi
             done
@@ -150,7 +150,7 @@ jobs:
 
       - name: Patch Missing Helpers in ContentView
         run: |
-          find . -name "ContentView.swift" | while read -r cv; do
+          find . -name "ContentView.swift" | while IFS= read -r cv; do
             echo "Verifying Swift helpers in $cv..."
             if ! grep -q "func statusRow" "$cv" && ! grep -q "var statusRow" "$cv"; then
               echo '' >> "$cv"
