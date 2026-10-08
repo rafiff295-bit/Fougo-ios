@@ -19,6 +19,9 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      # ----------------------------------------------------
+      # 1. EXTRACT ZIP
+      # ----------------------------------------------------
       - name: Extract Zip Files
         run: |
           find . -maxdepth 2 -name "*.zip" -type f | while IFS= read -r f; do
@@ -26,6 +29,9 @@ jobs:
             unzip -q -o "$f"
           done
 
+      # ----------------------------------------------------
+      # 2. LOCATE XCODE PROJECT
+      # ----------------------------------------------------
       - name: Locate Project & Scheme
         run: |
           PROJ_PATH=$(find . -name "ThreeOneOSFive.xcodeproj" -type d | head -n 1)
@@ -36,6 +42,9 @@ jobs:
           fi
           echo "PROJECT_PATH=$PROJ_PATH" >> $GITHUB_ENV
 
+      # ----------------------------------------------------
+      # 3. FIX PROJECT SYNTAX & UNQUOTED NAMES
+      # ----------------------------------------------------
       - name: Fix Project Syntax & Missing Quotes
         run: |
           PBX="$PROJECT_PATH/project.pbxproj"
@@ -43,6 +52,9 @@ jobs:
           python3 -c "import re, sys; p=sys.argv[1]; s=open(p, encoding='utf-8', errors='ignore').read(); open(p,'w', encoding='utf-8').write(re.sub(r'(\b\w+\s*=\s*)([^\";{}\n]+?)(\s*;)', lambda m: f'{m.group(1)}\"{m.group(2).strip()}\"{m.group(3)}' if (' ' in m.group(2) or '(' in m.group(2)) and not m.group(2).strip().startswith('\"') else m.group(0), s))" "$PBX"
           plutil -lint "$PBX" || true
 
+      # ----------------------------------------------------
+      # 4. SYNC PATCH RESOURCES
+      # ----------------------------------------------------
       - name: Sync Patch Resource Files
         run: |
           find . -type d -name "Patches" | while read -r pdir; do
@@ -54,20 +66,29 @@ jobs:
             done
           done
 
+      # ----------------------------------------------------
+      # 5. FIX APP ICON DIMENSIONS
+      # ----------------------------------------------------
       - name: Fix AppIcon Dimensions to 1024x1024
         run: |
           find . -path "*/AppIcon.appiconset/*.png" -exec sips -z 1024 1024 {} + || true
 
+      # ----------------------------------------------------
+      # 6. APPEND panelTitle HELPER TO BOTTOM OF SWIFT FILE
+      # ----------------------------------------------------
       - name: Patch Missing panelTitle in ContentView
         run: |
           find . -name "ContentView.swift" | while read -r cv; do
             if grep -q "panelTitle(" "$cv" && ! grep -q "func panelTitle" "$cv"; then
-              echo "Injecting panelTitle helper into $cv..."
-              printf 'import SwiftUI\n@ViewBuilder\nfunc panelTitle(_ title: String, icon: String) -> some View {\n  HStack(spacing: 6) {\n    Image(systemName: icon).font(.system(size: 13, weight: .semibold))\n    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)\n  }\n}\n' > /tmp/p.swift
-              cat /tmp/p.swift "$cv" > /tmp/cv2.swift && mv /tmp/cv2.swift "$cv"
+              echo "Appending panelTitle helper to end of $cv..."
+              printf '\n\n@ViewBuilder\nfunc panelTitle(_ title: String, icon: String) -> some View {\n  HStack(spacing: 6) {\n    Image(systemName: icon).font(.system(size: 13, weight: .semibold))\n    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)\n  }\n}\n' >> "$cv"
+              echo "Appended panelTitle to $cv"
             fi
           done
 
+      # ----------------------------------------------------
+      # 7. SELECT XCODE VERSION
+      # ----------------------------------------------------
       - name: Select Xcode Version
         run: |
           if [ -d "/Applications/Xcode_15.4.app" ]; then
@@ -75,8 +96,13 @@ jobs:
           fi
           xcodebuild -version
 
+      # ----------------------------------------------------
+      # 8. COMPILE WITH XCODEBUILD & DETAILED ERROR LOGGING
+      # ----------------------------------------------------
       - name: Compile with xcodebuild
         run: |
+          set -o pipefail
+          BUILD_SUCCESS=0
           xcodebuild clean build \
             -project "$PROJECT_PATH" \
             -scheme "FOUGO" \
@@ -87,8 +113,19 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES
+            AD_HOC_CODE_SIGNING_ALLOWED=YES 2>&1 | tee xcodebuild.log || BUILD_SUCCESS=$?
 
+          if [ $BUILD_SUCCESS -ne 0 ]; then
+            echo "=========================================="
+            echo "::error::COMPILATION FAILED! EXACT ERRORS:"
+            grep -E "error:|fatal error:|\*\* BUILD FAILED \*\*" xcodebuild.log || true
+            echo "=========================================="
+            exit $BUILD_SUCCESS
+          fi
+
+      # ----------------------------------------------------
+      # 9. PACKAGE .app INTO .ipa
+      # ----------------------------------------------------
       - name: Package .app into .ipa
         run: |
           APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
@@ -102,6 +139,9 @@ jobs:
           rm -rf Payload
           ls -lh FOUGO.ipa
 
+      # ----------------------------------------------------
+      # 10. UPLOAD ARTIFACT
+      # ----------------------------------------------------
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
