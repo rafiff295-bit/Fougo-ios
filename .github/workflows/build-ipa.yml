@@ -187,24 +187,14 @@ jobs:
               echo '  }' >> "$cv"
               echo '}' >> "$cv"
             fi
-            if ! grep -q "developerCredits" "$cv"; then
-              if grep -q "developerCredits()" "$cv"; then
-                echo '' >> "$cv"
-                echo '@ViewBuilder' >> "$cv"
-                echo 'func developerCredits() -> some View {' >> "$cv"
-                echo '  HStack {' >> "$cv"
-                echo '    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)' >> "$cv"
-                echo '  }' >> "$cv"
-                echo '}' >> "$cv"
-              else
-                echo '' >> "$cv"
-                echo '@ViewBuilder' >> "$cv"
-                echo 'var developerCredits: some View {' >> "$cv"
-                echo '  HStack {' >> "$cv"
-                echo '    Text("FOUGO Developer").font(.caption).foregroundColor(.secondary)' >> "$cv"
-                echo '  }' >> "$cv"
-                echo '}' >> "$cv"
-              fi
+            if ! grep -q "var developerCredits" "$cv" && ! grep -q "func developerCredits" "$cv"; then
+              echo '' >> "$cv"
+              echo 'extension ContentView {' >> "$cv"
+              echo '  @ViewBuilder' >> "$cv"
+              echo '  var developerCredits: some View {' >> "$cv"
+              echo '    EmptyView()' >> "$cv"
+              echo '  }' >> "$cv"
+              echo '}' >> "$cv"
             fi
           done
 
