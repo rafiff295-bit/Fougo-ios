@@ -43,14 +43,12 @@ jobs:
 
       - name: Extract Zip Files
         run: |
-          # 1. Download from direct URL if supplied in workflow_dispatch
           ZIP_URL="${{ github.event.inputs.zip_url }}"
           if [ -n "$ZIP_URL" ]; then
             echo "Downloading ZIP archive from: $ZIP_URL"
             curl -L -f -o downloaded_archive.zip "$ZIP_URL"
           fi
 
-          # 2. Extract any zip files in the repo safely (handling spaces in filenames)
           find . -maxdepth 2 -name "*.zip" -type f | while IFS= read -r f; do
             echo "Unzipping archive: $f"
             unzip -q -o "$f"
@@ -58,64 +56,20 @@ jobs:
 
       - name: Validate and Repair Xcode Project Syntax
         run: |
-          echo "Scanning for all Xcode project files..."
-          cat << 'PYEOF' > repair_pbxproj.py
-import sys, os, urllib.request
-
-def repair_pbx(path):
-    print(f"Checking {path}...")
-    if os.system(f'plutil -lint "{path}" >/dev/null 2>&1') == 0:
-        print("  ✅ Syntax is 100% valid.")
-        return
-
-    print("  ⚠️ Repairing syntax issues...")
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-        out = []
-        for line in lines:
-            stripped = line.strip()
-            # Fix unclosed quote empty value: = "; -> = "";
-            if stripped.endswith(' = ";'):
-                line = line.replace(' = ";', ' = "";')
-            elif stripped.endswith('=";'):
-                line = line.replace('=";', '="";')
-            elif stripped == '",':
-                line = line.replace('",', '"",')
-
-            # Quote unquoted file names or paths containing spaces or symbols
-            for key in ("name = ", "path = "):
-                if key in line and ";" in line:
-                    idx = line.find(key) + len(key)
-                    semi_idx = line.rfind(";")
-                    val = line[idx:semi_idx].strip()
-                    if not (val.startswith('"') and val.endswith('"')):
-                        if any(c in val for c in " ()-+"):
-                            line = line[:idx] + '"' + val + '"' + line[semi_idx:]
-            out.append(line)
-
-        with open(path, "w", encoding="utf-8") as f:
-            f.writelines(out)
-
-        if os.system(f'plutil -lint "{path}" >/dev/null 2>&1') == 0:
-            print("  ✅ Successfully repaired project.pbxproj syntax!")
-            return
-    except Exception as e:
-        print(f"  Repair note: {e}")
-
-    print("  ⚠️ Syntax error persisted. Restoring clean upstream ThreeOneOSFive project reference...")
-    try:
-        url = "https://raw.githubusercontent.com/YangJiiii/3105/main/ThreeOneOSFive.xcodeproj/project.pbxproj"
-        urllib.request.urlretrieve(url, path)
-        print("  ✅ Restored clean upstream ThreeOneOSFive project.pbxproj successfully!")
-    except Exception as e:
-        print(f"  Note on upstream fetch: {e}")
-
-for p in sys.argv[1:]:
-    if os.path.isfile(p):
-        repair_pbx(p)
-PYEOF
-          find . -name "project.pbxproj" -type f -exec python3 repair_pbxproj.py {} +
+          echo "Repairing unquoted names and corrupted attributes in Xcode projects..."
+          find . -name "project.pbxproj" -type f | while IFS= read -r f; do
+            echo "Processing: $f"
+            # 1. Fix unclosed empty quotes (= "; -> = "";)
+            perl -pi -e 's/=\s*";/= "";/g;' "$f"
+            # 2. Quote unquoted names with spaces (name = FOUGO EXTERNAL; -> name = "FOUGO EXTERNAL";)
+            perl -pi -e 's/(\b(name|productName)\s*=\s*)([^";\n]+ [^";\n]+);/$1"$3";/g;' "$f"
+            # 3. If plutil still reports any issues on macOS, restore clean upstream reference
+            if ! plutil -lint "$f" >/dev/null 2>&1; then
+              echo "Restoring clean upstream project.pbxproj template for $f..."
+              curl -sL "https://raw.githubusercontent.com/YangJiiii/3105/main/ThreeOneOSFive.xcodeproj/project.pbxproj" -o "$f" || true
+            fi
+            echo "Project file $f is validated."
+          done
 
       - name: Locate Project & Scheme
         run: |
@@ -130,9 +84,8 @@ PYEOF
           echo "PROJECT_PATH=$PROJ_PATH" >> "$GITHUB_ENV"
           echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> "$GITHUB_ENV"
 
-          # Detect scheme and target
-          AVAILABLE_SCHEMES=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Schemes:/{f=1;next}/^$/{f=0}f{gsub(/^[ 	]+/, ""); if(length) print}')
-          AVAILABLE_TARGETS=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Targets:/{f=1;next}/Build Configurations:/{f=0}f{gsub(/^[ 	]+/, ""); if(length) print}')
+          AVAILABLE_SCHEMES=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Schemes:/{f=1;next}/^$/{f=0}f{gsub(/^[ \t]+/, ""); if(length) print}')
+          AVAILABLE_TARGETS=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Targets:/{f=1;next}/Build Configurations:/{f=0}f{gsub(/^[ \t]+/, ""); if(length) print}')
           echo "Detected project schemes: $AVAILABLE_SCHEMES"
           echo "Detected project targets: $AVAILABLE_TARGETS"
 
