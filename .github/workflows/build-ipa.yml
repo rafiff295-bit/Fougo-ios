@@ -131,8 +131,8 @@ PYEOF
           echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> "$GITHUB_ENV"
 
           # Detect scheme and target
-          AVAILABLE_SCHEMES=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Schemes:/{f=1;next}/^$/{f=0}f{gsub(/^[ \t]+/, ""); if(length) print}')
-          AVAILABLE_TARGETS=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Targets:/{f=1;next}/Build Configurations:/{f=0}f{gsub(/^[ \t]+/, ""); if(length) print}')
+          AVAILABLE_SCHEMES=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Schemes:/{f=1;next}/^$/{f=0}f{gsub(/^[ 	]+/, ""); if(length) print}')
+          AVAILABLE_TARGETS=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Targets:/{f=1;next}/Build Configurations:/{f=0}f{gsub(/^[ 	]+/, ""); if(length) print}')
           echo "Detected project schemes: $AVAILABLE_SCHEMES"
           echo "Detected project targets: $AVAILABLE_TARGETS"
 
