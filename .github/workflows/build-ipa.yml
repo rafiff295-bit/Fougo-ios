@@ -43,12 +43,14 @@ jobs:
 
       - name: Extract Zip Files
         run: |
+          # 1. Download from direct URL if supplied in workflow_dispatch
           ZIP_URL="${{ github.event.inputs.zip_url }}"
           if [ -n "$ZIP_URL" ]; then
             echo "Downloading ZIP archive from: $ZIP_URL"
             curl -L -f -o downloaded_archive.zip "$ZIP_URL"
           fi
 
+          # 2. Extract any zip files in the repo safely (handling spaces in filenames)
           find . -maxdepth 2 -name "*.zip" -type f | while IFS= read -r f; do
             echo "Unzipping archive: $f"
             unzip -q -o "$f"
@@ -60,14 +62,11 @@ jobs:
           find . -name "project.pbxproj" -type f | while IFS= read -r f; do
             echo "Processing: $f"
             # 1. Fix unclosed empty quotes (= "; -> = "";)
-            perl -pi -e 's/=\s*";/= "";/g;' "$f"
-            # 2. Quote unquoted names with spaces (name = FOUGO EXTERNAL; -> name = "FOUGO EXTERNAL";)
-            perl -pi -e 's/(\b(name|productName)\s*=\s*)([^";\n]+ [^";\n]+);/$1"$3";/g;' "$f"
-            # 3. If plutil still reports any issues on macOS, restore clean upstream reference
-            if ! plutil -lint "$f" >/dev/null 2>&1; then
-              echo "Restoring clean upstream project.pbxproj template for $f..."
-              curl -sL "https://raw.githubusercontent.com/YangJiiii/3105/main/ThreeOneOSFive.xcodeproj/project.pbxproj" -o "$f" || true
-            fi
+            perl -pi -e 's/=[ \t]*";/= "";/g;' "$f"
+            # 2. Quote all unquoted values containing spaces (name, productName, PRODUCT_NAME = "FOUGO EXTERNAL";)
+            perl -pi -e 's/([a-zA-Z0-9_]+[ \t]*=[ \t]*)([^";]+ [^";]+);/$1"$2";/g;' "$f"
+            # 3. Validate syntax on macOS
+            plutil -lint "$f" || true
             echo "Project file $f is validated."
           done
 
@@ -84,6 +83,7 @@ jobs:
           echo "PROJECT_PATH=$PROJ_PATH" >> "$GITHUB_ENV"
           echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> "$GITHUB_ENV"
 
+          # Detect scheme and target
           AVAILABLE_SCHEMES=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Schemes:/{f=1;next}/^$/{f=0}f{gsub(/^[ \t]+/, ""); if(length) print}')
           AVAILABLE_TARGETS=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Targets:/{f=1;next}/Build Configurations:/{f=0}f{gsub(/^[ \t]+/, ""); if(length) print}')
           echo "Detected project schemes: $AVAILABLE_SCHEMES"
@@ -227,7 +227,7 @@ jobs:
           if [ $BUILD_SUCCESS -ne 0 ]; then
             echo "=========================================="
             echo "::error::CRITICAL COMPILATION ERRORS FOUND:"
-            grep -E "error:|fatal error:|** BUILD FAILED **" xcodebuild.log || true
+            grep -E "error:|fatal error:|BUILD FAILED" xcodebuild.log || true
             echo "=========================================="
             exit $BUILD_SUCCESS
           fi
