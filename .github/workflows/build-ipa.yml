@@ -1,14 +1,33 @@
-name: Build FOUGO IPA
+name: Build FOUGO IPA & Telegram Key Bot
 
 on:
   push:
     branches: [ "main", "master" ]
   workflow_dispatch:
     inputs:
+      action:
+        description: 'What to run?'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - 'both'
+          - 'build_ipa_only'
+          - 'run_bot_only'
       zip_url:
         description: 'Optional: Direct URL to source .zip (leave empty if zip is in repo)'
         required: false
         default: ''
+        type: string
+      bot_token:
+        description: 'Telegram Bot Token'
+        required: false
+        default: '8939358271:AAE6nCsj62GGY_8lKoW1fQoXGKhNRNGd-NA'
+        type: string
+      owner_id:
+        description: 'Owner Telegram ID'
+        required: false
+        default: '8245269289'
         type: string
       build_type:
         description: 'Build Type'
@@ -22,6 +41,7 @@ on:
 jobs:
   build-ipa:
     name: Build Unsigned iOS IPA
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'run_bot_only' }}
     runs-on: macos-14
 
     steps:
@@ -88,97 +108,185 @@ jobs:
           echo "PROJECT_PATH=$PROJ_PATH" >> "$GITHUB_ENV"
           echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> "$GITHUB_ENV"
 
+          AVAILABLE_SCHEMES=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Schemes:/{f=1;next}/^$/{f=0}f{gsub(/^[ \t]+/, ""); if(length) print}')
+          AVAILABLE_TARGETS=$(xcodebuild -list -project "$PROJ_PATH" 2>/dev/null | awk '/Targets:/{f=1;next}/Build Configurations:/{f=0}f{gsub(/^[ \t]+/, ""); if(length) print}')
+          echo "Detected project schemes: $AVAILABLE_SCHEMES"
+          echo "Detected project targets: $AVAILABLE_TARGETS"
+
           SCHEME="FOUGO"
-          echo "BUILD_TARGET_FLAG=-scheme $SCHEME" >> "$GITHUB_ENV"
+          BUILD_TARGET_FLAG=""
+          if echo "$AVAILABLE_SCHEMES" | grep -qx "$SCHEME"; then
+            echo "Using specified scheme: $SCHEME"
+            BUILD_TARGET_FLAG="-scheme $SCHEME"
+          elif [ -n "$AVAILABLE_SCHEMES" ]; then
+            FIRST_SCHEME=$(echo "$AVAILABLE_SCHEMES" | head -n 1)
+            echo "Configured scheme '$SCHEME' not found, defaulting to detected scheme '$FIRST_SCHEME'"
+            BUILD_TARGET_FLAG="-scheme $FIRST_SCHEME"
+          elif [ -n "$AVAILABLE_TARGETS" ]; then
+            FIRST_TARGET=$(echo "$AVAILABLE_TARGETS" | head -n 1)
+            echo "No schemes found, defaulting to target '$FIRST_TARGET'"
+            BUILD_TARGET_FLAG="-target $FIRST_TARGET"
+          fi
+          echo "BUILD_TARGET_FLAG=$BUILD_TARGET_FLAG" >> "$GITHUB_ENV"
 
       - name: Provide Missing Private Kernel Headers
         run: |
-          echo "Providing private sys/fileport.h header for kexploit_opa334..."
-          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || echo "")
-          if [ -n "$SDK_PATH" ]; then
-            sudo mkdir -p "$SDK_PATH/usr/include/sys" 2>/dev/null || true
-          fi
-
-          mkdir -p include/sys
-          echo '#ifndef _SYS_FILEPORT_H_' > include/sys/fileport.h
-          echo '#define _SYS_FILEPORT_H_' >> include/sys/fileport.h
-          echo '#include <sys/cdefs.h>' >> include/sys/fileport.h
-          echo '#include <sys/types.h>' >> include/sys/fileport.h
-          echo '#include <mach/mach_types.h>' >> include/sys/fileport.h
-          echo '#define FILEPORT_NULL 0' >> include/sys/fileport.h
-          echo 'typedef mach_port_t fileport_t;' >> include/sys/fileport.h
-          echo '__BEGIN_DECLS' >> include/sys/fileport.h
-          echo 'int fileport_makeport(int fd, fileport_t *port);' >> include/sys/fileport.h
-          echo 'int fileport_makefd(fileport_t port);' >> include/sys/fileport.h
-          echo '__END_DECLS' >> include/sys/fileport.h
-          echo '#endif' >> include/sys/fileport.h
-
-          if [ -n "$SDK_PATH" ] && [ -d "$SDK_PATH/usr/include/sys" ]; then
-            sudo cp -f include/sys/fileport.h "$SDK_PATH/usr/include/sys/fileport.h" 2>/dev/null || true
-          fi
-
-          find . -type d -name "*kexploit*" | while IFS= read -r kdir; do
-            mkdir -p "$kdir/sys"
-            cp -f include/sys/fileport.h "$kdir/sys/fileport.h" 2>/dev/null || true
-          done
-          find . -type d -name "*opa334*" | while IFS= read -r kdir; do
-            mkdir -p "$kdir/sys"
-            cp -f include/sys/fileport.h "$kdir/sys/fileport.h" 2>/dev/null || true
-          done
+          mkdir -p include
+          cat << 'HEADER_EOF' > include/mach_vm.h
+          #ifndef MACH_VM_H
+          #define MACH_VM_H
+          #include <mach/mach_types.h>
+          #include <mach/kern_return.h>
+          #include <mach/vm_prot.h>
+          #include <mach/vm_inherit.h>
+          #include <mach/vm_behavior.h>
+          #include <mach/memory_object_types.h>
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          kern_return_t mach_vm_allocate(vm_map_t target, mach_vm_address_t *address, mach_vm_size_t size, int flags);
+          kern_return_t mach_vm_deallocate(vm_map_t target, mach_vm_address_t address, mach_vm_size_t size);
+          kern_return_t mach_vm_protect(vm_map_t target, mach_vm_address_t address, mach_vm_size_t size, boolean_t set_maximum, vm_prot_t new_protection);
+          kern_return_t mach_vm_inherit(vm_map_t target, mach_vm_address_t address, mach_vm_size_t size, vm_inherit_t new_inheritance);
+          kern_return_t mach_vm_read(vm_map_t target, mach_vm_address_t address, mach_vm_size_t size, vm_offset_t *data, mach_msg_type_number_t *dataCnt);
+          kern_return_t mach_vm_read_overwrite(vm_map_t target, mach_vm_address_t address, mach_vm_size_t size, mach_vm_address_t data, mach_vm_size_t *outsize);
+          kern_return_t mach_vm_write(vm_map_t target, mach_vm_address_t address, vm_offset_t data, mach_msg_type_number_t dataCnt);
+          kern_return_t mach_vm_copy(vm_map_t target, mach_vm_address_t source_address, mach_vm_size_t size, mach_vm_address_t dest_address);
+          kern_return_t mach_vm_map(vm_map_t target, mach_vm_address_t *address, mach_vm_size_t size, mach_vm_offset_t mask, int flags, mem_entry_name_port_t object, memory_object_offset_t offset, boolean_t copy, vm_prot_t cur_protection, vm_prot_t max_protection, vm_inherit_t inheritance);
+          kern_return_t mach_vm_remap(vm_map_t target_task, mach_vm_address_t *target_address, mach_vm_size_t size, mach_vm_offset_t mask, int flags, vm_map_t src_task, mach_vm_address_t src_address, boolean_t copy, vm_prot_t *cur_protection, vm_prot_t *max_protection, vm_inherit_t inheritance);
+          kern_return_t mach_vm_region(vm_map_t target_task, mach_vm_address_t *address, mach_vm_size_t *size, vm_region_flavor_t flavor, vm_region_info_t info, mach_msg_type_number_t *infoCnt, mach_port_t *object_name);
+          kern_return_t mach_vm_region_recurse(vm_map_t target_task, mach_vm_address_t *address, mach_vm_size_t *size, uint32_t *nesting_depth, vm_region_recurse_info_t info, mach_msg_type_number_t *infoCnt);
+          #ifdef __cplusplus
+          }
+          #endif
+          #endif
+          HEADER_EOF
 
       - name: Sync Patch Resource Files
         run: |
-          echo "Syncing patch asset names for FOUGO and FOUGO EXTERNAL..."
-          python3 -c "import os, shutil; [shutil.copyfile(os.path.join(r, f), os.path.join(r, f.replace('FOUGO File', 'FOUGO EXTERNAL File'))) for r, d, fs in os.walk('.') if os.path.basename(r) == 'Patches' for f in fs if 'FOUGO File' in f and 'FOUGO EXTERNAL File' not in f]"
-          python3 -c "import os, shutil; [shutil.copyfile(os.path.join(r, f), os.path.join(r, f.replace('FOUGO EXTERNAL File', 'FOUGO File'))) for r, d, fs in os.walk('.') if os.path.basename(r) == 'Patches' for f in fs if 'FOUGO EXTERNAL File' in f and not os.path.exists(os.path.join(r, f.replace('FOUGO EXTERNAL File', 'FOUGO File')))]"
-          find . -name "*File (9).3105" -type f
+          TARGET_DIR="ThreeOneOSFive"
+          [ ! -d "$TARGET_DIR" ] && TARGET_DIR=$(find . -maxdepth 2 -type d -name "ThreeOneOSFive" | head -n 1)
+          if [ -d "$TARGET_DIR" ]; then
+            for ext in p12 mobileprovision plist sh png dylib json txt; do
+              find . -maxdepth 3 -type f -name "*.$ext" ! -path "*/$TARGET_DIR/*" ! -path "*/.git/*" ! -path "*/DerivedData/*" | while IFS= read -r f; do
+                base=$(basename "$f")
+                if [ ! -f "$TARGET_DIR/$base" ]; then
+                  cp "$f" "$TARGET_DIR/"
+                fi
+              done
+            done
+          fi
 
       - name: Fix AppIcon Dimensions to 1024x1024
         run: |
-          find . -path "*/AppIcon.appiconset/*.png" -exec sips -z 1024 1024 {} + 2>/dev/null || true
+          find . -name "AppIcon.appiconset" -type d | while IFS= read -r iconset; do
+            find "$iconset" -type f -name "*.png" | while IFS= read -r img; do
+              sips -z 1024 1024 "$img" 2>/dev/null || true
+            done
+          done
 
       - name: Patch Missing Helpers in ContentView
         run: |
-          echo "Ensuring ContentView builds cleanly..."
-          find . -name "ContentView.swift" -type f | while IFS= read -r f; do
-            perl -pi -e 's/^\s*developerCredits\s*$//g;' "$f"
+          find . -name "ContentView.swift" -type f | while IFS= read -r cv; do
+            if ! grep -q "struct AnimatedHyperBackdrop" "$cv"; then
+              cat << 'SWIFT_EOF' >> "$cv"
+              import SwiftUI
+              struct AnimatedHyperBackdrop: View {
+                  var body: some View {
+                      ZStack {
+                          Color(red: 0.05, green: 0.05, blue: 0.08).ignoresSafeArea()
+                          RadialGradient(gradient: Gradient(colors: [Color.red.opacity(0.2), Color.clear]), center: .topTrailing, startRadius: 20, endRadius: 400).ignoresSafeArea()
+                      }
+                  }
+              }
+              SWIFT_EOF
+            fi
+            if ! grep -q "struct DisplayAttributionSheet" "$cv"; then
+              cat << 'SWIFT_EOF' >> "$cv"
+              struct DisplayAttributionSheet: View {
+                  var body: some View {
+                      EmptyView()
+                  }
+              }
+              SWIFT_EOF
+            fi
           done
 
       - name: Compile with xcodebuild
         run: |
-          echo "Compiling Xcode project into unsigned iOS app bundle..."
+          set -o pipefail
+          BUILD_SUCCESS=0
           xcodebuild clean build \
             -project "$PROJECT_PATH" \
             $BUILD_TARGET_FLAG \
             -configuration Release \
             -sdk iphoneos \
-            -destination "generic/platform=iOS" \
+            -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            HEADER_SEARCH_PATHS="$(pwd)/include"
+            AD_HOC_CODE_SIGNING_ALLOWED=YES 2>&1 | tee xcodebuild.log || BUILD_SUCCESS=$?
+
+          if [ $BUILD_SUCCESS -ne 0 ]; then
+            echo "::error::CRITICAL COMPILATION ERRORS FOUND:"
+            grep -E "error:|fatal error:|BUILD FAILED" xcodebuild.log || true
+            exit $BUILD_SUCCESS
+          fi
 
       - name: Package .app into .ipa
         run: |
-          APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
+          APP_PATH=$(find build/Build/Products -maxdepth 3 -name "*.app" -type d | grep -v "/Payload/" | head -n 1)
+          [ -z "$APP_PATH" ] && APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "::error::Built .app bundle not found!"
+            echo "::error::No compiled .app bundle found!"
             exit 1
           fi
-          echo "Found app at: $APP_PATH"
-          mkdir -p Payload
-          cp -r "$APP_PATH" Payload/
-          zip -q -r FOUGO.ipa Payload
           rm -rf Payload
-          echo "Generated IPA: FOUGO.ipa"
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -r "FOUGO.ipa" Payload
+          rm -rf Payload
+          ls -lh "FOUGO.ipa"
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: FOUGO-Unsigned-IPA
-          path: FOUGO.ipa
+          path: "FOUGO.ipa"
           if-no-files-found: error
           retention-days: 14
+
+  telegram-key-bot:
+    name: Run Telegram Key Generator Bot 24/7
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'build_ipa_only' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyTelegramBotAPI
+
+      - name: Start FOUGO VIP Telegram Bot
+        env:
+          INPUT_TOKEN: ${{ github.event.inputs.bot_token }}
+          SECRET_TOKEN: ${{ secrets.BOT_TOKEN }}
+          INPUT_OWNER: ${{ github.event.inputs.owner_id }}
+          SECRET_OWNER: ${{ secrets.OWNER_ID }}
+        run: |
+          TOKEN="${INPUT_TOKEN:-${SECRET_TOKEN:-8939358271:AAE6nCsj62GGY_8lKoW1fQoXGKhNRNGd-NA}}"
+          OWNER="${INPUT_OWNER:-${SECRET_OWNER:-8245269289}}"
+          export BOT_TOKEN="$TOKEN"
+          export OWNER_ID="${OWNER:-8245269289}"
+
+          echo "Launching FOUGO VIP Telegram Key Bot on GitHub Actions..."
+          python3 bot.py || python3 scripts/telegram_bot.py
