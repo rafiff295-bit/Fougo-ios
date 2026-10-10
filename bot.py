@@ -3,7 +3,7 @@
 🛡️ FOUGO VIP - 100% BUTTON-DRIVEN TELEGRAM BOT (ULTRA RESILIENT EDITION)
 =============================================================================
 👑 Owner ID: 8245269289
-🤖 Bot Token: 8939358271:AAE6nCsj62GGY_8lKoW1fQoXGKhNRNGd-NA
+🤖 Bot Token: 8974328420:AAH0vNMnDVbCK05EjQU_hbl6DyaIneFmsGI
 📌 নো কমান্ড — ১০০% আকর্ষণীয় ইনলাইন বাটন দ্বারা পরিচালিত!
 =============================================================================
 """
@@ -20,7 +20,7 @@ from telebot import types
 # =============================================================================
 # ⚙️ কনফিগারেশন (User Specified)
 # =============================================================================
-DEFAULT_BOT_TOKEN = "8939358271:AAE6nCsj62GGY_8lKoW1fQoXGKhNRNGd-NA"
+DEFAULT_BOT_TOKEN = "8974328420:AAH0vNMnDVbCK05EjQU_hbl6DyaIneFmsGI"
 DEFAULT_OWNER_ID = 8245269289
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip() or DEFAULT_BOT_TOKEN
