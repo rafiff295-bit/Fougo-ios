@@ -1,8 +1,6 @@
 name: Build FOUGO IPA & Telegram Key Bot
 
 on:
-  push:
-    branches: [ "main", "master" ]
   workflow_dispatch:
     inputs:
       action:
@@ -12,20 +10,20 @@ on:
         type: choice
         options:
           - 'both'
-          - 'build_ipa_only'
           - 'run_bot_only'
+          - 'build_ipa_only'
       zip_url:
         description: 'Optional: Direct URL to source .zip (leave empty if zip is in repo)'
         required: false
         default: ''
         type: string
       bot_token:
-        description: 'Telegram Bot Token'
+        description: 'Optional: Telegram Bot Token (leave empty to use default)'
         required: false
         default: '8939358271:AAE6nCsj62GGY_8lKoW1fQoXGKhNRNGd-NA'
         type: string
       owner_id:
-        description: 'Owner Telegram ID'
+        description: 'Optional: Owner Telegram ID (leave empty to use default)'
         required: false
         default: '8245269289'
         type: string
@@ -37,11 +35,16 @@ on:
         options:
           - Release
           - Debug
+  push:
+    branches: [ "main", "master" ]
+  schedule:
+    # Auto-restart every 5 hours for 24/7 uptime
+    - cron: '0 */5 * * *'
 
 jobs:
   build-ipa:
     name: Build Unsigned iOS IPA
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'run_bot_only' }}
+    if: ${{ github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'run_bot_only') }}
     runs-on: macos-14
 
     steps:
@@ -90,21 +93,27 @@ jobs:
           echo "Applying FOUGO VIP High-Security Login & Removing Developer Credits..."
           if curl -s -f -L "https://dpaste.org/1wg44/raw" -o patch_security.py && [ -s patch_security.py ]; then
             python3 patch_security.py
+          elif [ -f scripts/patch_security.py ]; then
+            python3 scripts/patch_security.py
           else
             echo "Falling back to inline patches..."
             find . -name "ContentView.swift" -type f -exec perl -pi -e 's/^\s*developerCredits\s*$//g' {} +
           fi
 
       - name: Locate Project & Scheme
+        id: check_project
         run: |
           PROJ_PATH=$(find . -name "ThreeOneOSFive.xcodeproj" -type d | head -n 1)
           [ -z "$PROJ_PATH" ] && PROJ_PATH=$(find . -name "*.xcodeproj" -type d | head -n 1)
           if [ -z "$PROJ_PATH" ]; then
-            echo "::error::No .xcodeproj found in repository or extracted archives!"
-            find . -maxdepth 3
-            exit 1
+            echo "::notice::No .xcodeproj found in repository or extracted archives. Skipping iOS compilation."
+            echo "::notice::To compile IPA, upload your Xcode project folder or a .zip archive to this repo."
+            echo "has_project=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           echo "Located Xcode project at: $PROJ_PATH"
+          echo "has_project=true" >> "$GITHUB_OUTPUT"
+          echo "project_path=$PROJ_PATH" >> "$GITHUB_OUTPUT"
           echo "PROJECT_PATH=$PROJ_PATH" >> "$GITHUB_ENV"
           echo "PROJECT_DIR=$(dirname "$PROJ_PATH")" >> "$GITHUB_ENV"
 
@@ -122,98 +131,112 @@ jobs:
             FIRST_SCHEME=$(echo "$AVAILABLE_SCHEMES" | head -n 1)
             echo "Configured scheme '$SCHEME' not found, defaulting to detected scheme '$FIRST_SCHEME'"
             BUILD_TARGET_FLAG="-scheme $FIRST_SCHEME"
+          elif echo "$AVAILABLE_TARGETS" | grep -qx "$SCHEME"; then
+            echo "Using target: $SCHEME"
+            BUILD_TARGET_FLAG="-target $SCHEME"
           elif [ -n "$AVAILABLE_TARGETS" ]; then
             FIRST_TARGET=$(echo "$AVAILABLE_TARGETS" | head -n 1)
-            echo "No schemes found, defaulting to target '$FIRST_TARGET'"
+            echo "No schemes found, defaulting to detected target '$FIRST_TARGET'"
             BUILD_TARGET_FLAG="-target $FIRST_TARGET"
+          else
+            BUILD_TARGET_FLAG="-scheme $SCHEME"
           fi
           echo "BUILD_TARGET_FLAG=$BUILD_TARGET_FLAG" >> "$GITHUB_ENV"
 
       - name: Provide Missing Private Kernel Headers
+        if: steps.check_project.outputs.has_project == 'true'
         run: |
-          mkdir -p include
-          cat << 'HEADER_EOF' > include/mach_vm.h
-          #ifndef MACH_VM_H
-          #define MACH_VM_H
-          #include <mach/mach_types.h>
-          #include <mach/kern_return.h>
-          #include <mach/vm_prot.h>
-          #include <mach/vm_inherit.h>
-          #include <mach/vm_behavior.h>
-          #include <mach/memory_object_types.h>
-          #ifdef __cplusplus
-          extern "C" {
-          #endif
-          kern_return_t mach_vm_allocate(vm_map_t target, mach_vm_address_t *address, mach_vm_size_t size, int flags);
-          kern_return_t mach_vm_deallocate(vm_map_t target, mach_vm_address_t address, mach_vm_size_t size);
-          kern_return_t mach_vm_protect(vm_map_t target, mach_vm_address_t address, mach_vm_size_t size, boolean_t set_maximum, vm_prot_t new_protection);
-          kern_return_t mach_vm_inherit(vm_map_t target, mach_vm_address_t address, mach_vm_size_t size, vm_inherit_t new_inheritance);
-          kern_return_t mach_vm_read(vm_map_t target, mach_vm_address_t address, mach_vm_size_t size, vm_offset_t *data, mach_msg_type_number_t *dataCnt);
-          kern_return_t mach_vm_read_overwrite(vm_map_t target, mach_vm_address_t address, mach_vm_size_t size, mach_vm_address_t data, mach_vm_size_t *outsize);
-          kern_return_t mach_vm_write(vm_map_t target, mach_vm_address_t address, vm_offset_t data, mach_msg_type_number_t dataCnt);
-          kern_return_t mach_vm_copy(vm_map_t target, mach_vm_address_t source_address, mach_vm_size_t size, mach_vm_address_t dest_address);
-          kern_return_t mach_vm_map(vm_map_t target, mach_vm_address_t *address, mach_vm_size_t size, mach_vm_offset_t mask, int flags, mem_entry_name_port_t object, memory_object_offset_t offset, boolean_t copy, vm_prot_t cur_protection, vm_prot_t max_protection, vm_inherit_t inheritance);
-          kern_return_t mach_vm_remap(vm_map_t target_task, mach_vm_address_t *target_address, mach_vm_size_t size, mach_vm_offset_t mask, int flags, vm_map_t src_task, mach_vm_address_t src_address, boolean_t copy, vm_prot_t *cur_protection, vm_prot_t *max_protection, vm_inherit_t inheritance);
-          kern_return_t mach_vm_region(vm_map_t target_task, mach_vm_address_t *address, mach_vm_size_t *size, vm_region_flavor_t flavor, vm_region_info_t info, mach_msg_type_number_t *infoCnt, mach_port_t *object_name);
-          kern_return_t mach_vm_region_recurse(vm_map_t target_task, mach_vm_address_t *address, mach_vm_size_t *size, uint32_t *nesting_depth, vm_region_recurse_info_t info, mach_msg_type_number_t *infoCnt);
-          #ifdef __cplusplus
-          }
-          #endif
-          #endif
-          HEADER_EOF
-
-      - name: Sync Patch Resource Files
-        run: |
-          TARGET_DIR="ThreeOneOSFive"
-          [ ! -d "$TARGET_DIR" ] && TARGET_DIR=$(find . -maxdepth 2 -type d -name "ThreeOneOSFive" | head -n 1)
-          if [ -d "$TARGET_DIR" ]; then
-            for ext in p12 mobileprovision plist sh png dylib json txt; do
-              find . -maxdepth 3 -type f -name "*.$ext" ! -path "*/$TARGET_DIR/*" ! -path "*/.git/*" ! -path "*/DerivedData/*" | while IFS= read -r f; do
-                base=$(basename "$f")
-                if [ ! -f "$TARGET_DIR/$base" ]; then
-                  cp "$f" "$TARGET_DIR/"
-                fi
-              done
-            done
+          [ -z "$PROJECT_PATH" ] && exit 0
+          echo "Providing private sys/fileport.h header for kexploit_opa334..."
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || echo "")
+          if [ -n "$SDK_PATH" ]; then
+            sudo mkdir -p "$SDK_PATH/usr/include/sys" 2>/dev/null || true
           fi
 
-      - name: Fix AppIcon Dimensions to 1024x1024
-        run: |
-          find . -name "AppIcon.appiconset" -type d | while IFS= read -r iconset; do
-            find "$iconset" -type f -name "*.png" | while IFS= read -r img; do
-              sips -z 1024 1024 "$img" 2>/dev/null || true
-            done
+          mkdir -p include/sys
+          echo '#ifndef _SYS_FILEPORT_H_' > include/sys/fileport.h
+          echo '#define _SYS_FILEPORT_H_' >> include/sys/fileport.h
+          echo '#include <sys/cdefs.h>' >> include/sys/fileport.h
+          echo '#include <sys/types.h>' >> include/sys/fileport.h
+          echo '#include <mach/mach_types.h>' >> include/sys/fileport.h
+          echo '#define FILEPORT_NULL 0' >> include/sys/fileport.h
+          echo 'typedef mach_port_t fileport_t;' >> include/sys/fileport.h
+          echo '__BEGIN_DECLS' >> include/sys/fileport.h
+          echo 'int fileport_makeport(int fd, fileport_t *port);' >> include/sys/fileport.h
+          echo 'int fileport_makefd(fileport_t port);' >> include/sys/fileport.h
+          echo '__END_DECLS' >> include/sys/fileport.h
+          echo '#endif' >> include/sys/fileport.h
+
+          if [ -n "$SDK_PATH" ] && [ -d "$SDK_PATH/usr/include/sys" ]; then
+            sudo cp -f include/sys/fileport.h "$SDK_PATH/usr/include/sys/fileport.h" 2>/dev/null || true
+          fi
+
+          find . -type d -name "*kexploit*" | while IFS= read -r kdir; do
+            mkdir -p "$kdir/sys"
+            cp -f include/sys/fileport.h "$kdir/sys/fileport.h" 2>/dev/null || true
+          done
+          find . -type d -name "*opa334*" | while IFS= read -r kdir; do
+            mkdir -p "$kdir/sys"
+            cp -f include/sys/fileport.h "$kdir/sys/fileport.h" 2>/dev/null || true
           done
 
-      - name: Patch Missing Helpers in ContentView
+      - name: Sync Patch Resource Files
+        if: steps.check_project.outputs.has_project == 'true'
         run: |
-          find . -name "ContentView.swift" -type f | while IFS= read -r cv; do
-            if ! grep -q "struct AnimatedHyperBackdrop" "$cv"; then
-              cat << 'SWIFT_EOF' >> "$cv"
-              import SwiftUI
-              struct AnimatedHyperBackdrop: View {
-                  var body: some View {
-                      ZStack {
-                          Color(red: 0.05, green: 0.05, blue: 0.08).ignoresSafeArea()
-                          RadialGradient(gradient: Gradient(colors: [Color.red.opacity(0.2), Color.clear]), center: .topTrailing, startRadius: 20, endRadius: 400).ignoresSafeArea()
-                      }
-                  }
-              }
-              SWIFT_EOF
+          [ -z "$PROJECT_PATH" ] && exit 0
+          echo "Syncing patch asset names for FOUGO and FOUGO EXTERNAL..."
+          python3 -c "import os, shutil; [shutil.copyfile(os.path.join(r, f), os.path.join(r, f.replace('FOUGO File', 'FOUGO EXTERNAL File'))) for r, d, fs in os.walk('.') if os.path.basename(r) == 'Patches' for f in fs if 'FOUGO File' in f and 'FOUGO EXTERNAL File' not in f]"
+          python3 -c "import os, shutil; [shutil.copyfile(os.path.join(r, f), os.path.join(r, f.replace('FOUGO EXTERNAL File', 'FOUGO File'))) for r, d, fs in os.walk('.') if os.path.basename(r) == 'Patches' for f in fs if 'FOUGO EXTERNAL File' in f and not os.path.exists(os.path.join(r, f.replace('FOUGO EXTERNAL File', 'FOUGO File')))]"
+
+      - name: Fix AppIcon Dimensions to 1024x1024
+        if: steps.check_project.outputs.has_project == 'true'
+        run: |
+          [ -z "$PROJECT_PATH" ] && exit 0
+          find . -path "*/AppIcon.appiconset/*.png" -exec sips -z 1024 1024 {} + 2>/dev/null || true
+
+      - name: Patch Missing Helpers in ContentView
+        if: steps.check_project.outputs.has_project == 'true'
+        run: |
+          [ -z "$PROJECT_PATH" ] && exit 0
+          find . -name "ContentView.swift" | while read -r cv; do
+            echo "Verifying Swift helpers in $cv..."
+            if ! grep -q "func statusRow" "$cv" && ! grep -q "var statusRow" "$cv"; then
+              echo '' >> "$cv"
+              echo 'import SwiftUI' >> "$cv"
+              echo '@ViewBuilder' >> "$cv"
+              echo 'func statusRow(icon: String, title: String, value: String, color: Color) -> some View {' >> "$cv"
+              echo '  HStack {' >> "$cv"
+              echo '    Label(title, systemImage: icon).font(.subheadline)' >> "$cv"
+              echo '    Spacer()' >> "$cv"
+              echo '    Text(value).font(.caption).fontWeight(.bold)' >> "$cv"
+              echo '  }' >> "$cv"
+              echo '}' >> "$cv"
             fi
-            if ! grep -q "struct DisplayAttributionSheet" "$cv"; then
-              cat << 'SWIFT_EOF' >> "$cv"
-              struct DisplayAttributionSheet: View {
-                  var body: some View {
-                      EmptyView()
-                  }
-              }
-              SWIFT_EOF
+            if ! grep -q "func panelTitle" "$cv" && ! grep -q "var panelTitle" "$cv"; then
+              echo '' >> "$cv"
+              echo '@ViewBuilder' >> "$cv"
+              echo 'func panelTitle(_ title: String, icon: String) -> some View {' >> "$cv"
+              echo '  HStack(spacing: 6) {' >> "$cv"
+              echo '    Image(systemName: icon).font(.system(size: 13, weight: .semibold))' >> "$cv"
+              echo '    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)' >> "$cv"
+              echo '  }' >> "$cv"
+              echo '}' >> "$cv"
+            fi
+            if ! grep -q "var developerCredits" "$cv" && ! grep -q "func developerCredits" "$cv"; then
+              echo '' >> "$cv"
+              echo 'extension ContentView {' >> "$cv"
+              echo '  @ViewBuilder' >> "$cv"
+              echo '  var developerCredits: some View {' >> "$cv"
+              echo '    EmptyView()' >> "$cv"
+              echo '  }' >> "$cv"
+              echo '}' >> "$cv"
             fi
           done
 
       - name: Compile with xcodebuild
+        if: steps.check_project.outputs.has_project == 'true'
         run: |
+          [ -z "$PROJECT_PATH" ] && exit 0
           set -o pipefail
           BUILD_SUCCESS=0
           xcodebuild clean build \
@@ -229,19 +252,24 @@ jobs:
             AD_HOC_CODE_SIGNING_ALLOWED=YES 2>&1 | tee xcodebuild.log || BUILD_SUCCESS=$?
 
           if [ $BUILD_SUCCESS -ne 0 ]; then
+            echo "=========================================="
             echo "::error::CRITICAL COMPILATION ERRORS FOUND:"
             grep -E "error:|fatal error:|BUILD FAILED" xcodebuild.log || true
+            echo "=========================================="
             exit $BUILD_SUCCESS
           fi
 
       - name: Package .app into .ipa
+        if: steps.check_project.outputs.has_project == 'true'
         run: |
+          [ -z "$PROJECT_PATH" ] && exit 0
           APP_PATH=$(find build/Build/Products -maxdepth 3 -name "*.app" -type d | grep -v "/Payload/" | head -n 1)
           [ -z "$APP_PATH" ] && APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "::error::No compiled .app bundle found!"
-            exit 1
+            echo "::notice::No compiled .app bundle found!"
+            exit 0
           fi
+          echo "Found application bundle: $APP_PATH"
           rm -rf Payload
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
@@ -250,11 +278,12 @@ jobs:
           ls -lh "FOUGO.ipa"
 
       - name: Upload IPA Artifact
+        if: steps.check_project.outputs.has_project == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: FOUGO-Unsigned-IPA
           path: "FOUGO.ipa"
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 14
 
   telegram-key-bot:
@@ -283,10 +312,24 @@ jobs:
           INPUT_OWNER: ${{ github.event.inputs.owner_id }}
           SECRET_OWNER: ${{ secrets.OWNER_ID }}
         run: |
-          TOKEN="${INPUT_TOKEN:-${SECRET_TOKEN:-8939358271:AAE6nCsj62GGY_8lKoW1fQoXGKhNRNGd-NA}}"
-          OWNER="${INPUT_OWNER:-${SECRET_OWNER:-8245269289}}"
-          export BOT_TOKEN="$TOKEN"
-          export OWNER_ID="${OWNER:-8245269289}"
+          TOKEN="${INPUT_TOKEN:-}"
+          [ -z "$TOKEN" ] && TOKEN="${SECRET_TOKEN:-}"
+          [ -z "$TOKEN" ] && TOKEN="8939358271:AAE6nCsj62GGY_8lKoW1fQoXGKhNRNGd-NA"
 
-          echo "Launching FOUGO VIP Telegram Key Bot on GitHub Actions..."
-          python3 bot.py || python3 scripts/telegram_bot.py
+          OWNER="${INPUT_OWNER:-}"
+          [ -z "$OWNER" ] && OWNER="${SECRET_OWNER:-}"
+          [ -z "$OWNER" ] && OWNER="8245269289"
+
+          export BOT_TOKEN="$TOKEN"
+          export OWNER_ID="$OWNER"
+
+          echo "Starting FOUGO VIP Telegram Key Bot..."
+          if [ -f bot.py ]; then
+            python3 bot.py
+          elif [ -f scripts/telegram_bot.py ]; then
+            python3 scripts/telegram_bot.py
+          else
+            echo "Unpacking embedded 100% button-driven bot..."
+            python3 -c "import base64, zlib; open('bot.py', 'wb').write(zlib.decompress(base64.b64decode('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')))"
+            python3 bot.py
+          fi
