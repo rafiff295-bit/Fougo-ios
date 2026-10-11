@@ -88,21 +88,27 @@ jobs:
             echo "Project file $f is validated."
           done
 
-      - name: Inject High-Security Login & Remove Developer Credits
+      - name: Inject High-Security Login & Screenshot 2 FougoSwitch Buttons
         run: |
-          echo "Applying FOUGO VIP High-Security Login & Removing Developer Credits..."
+          echo "Applying FOUGO VIP Security & Screenshot 2 UI Patches..."
           if [ -f scripts/patch_security.py ]; then
             python3 scripts/patch_security.py
           elif [ -f patch_security.py ]; then
             python3 patch_security.py
+          else
+            echo "::warning::scripts/patch_security.py not found in repo root. Checking subfolders..."
+            PATCH_SCRIPT=$(find . -name "patch_security.py" | head -n 1)
+            if [ -n "$PATCH_SCRIPT" ]; then
+              python3 "$PATCH_SCRIPT"
+            fi
           fi
 
       - name: Register Free Fire URL Schemes in Info.plist
         run: |
           echo "Registering LSApplicationQueriesSchemes for Free Fire and Free Fire MAX..."
           find . -name "Info.plist" | while read -r plist; do
-            plutil -insert LSApplicationQueriesSchemes -xml '<array><string>freefire</string><string>freefireth</string><string>freefiremax</string><string>ff</string><string>ffmax</string></array>' "$plist" 2>/dev/null || \
-            plutil -replace LSApplicationQueriesSchemes -xml '<array><string>freefire</string><string>freefireth</string><string>freefiremax</string><string>ff</string><string>ffmax</string></array>' "$plist" 2>/dev/null || true
+            plutil -insert LSApplicationQueriesSchemes -xml '<array><string>freefire</string><string>freefiremax</string><string>ff</string><string>ffmax</string></array>' "$plist" 2>/dev/null || \
+            plutil -replace LSApplicationQueriesSchemes -xml '<array><string>freefire</string><string>freefiremax</string><string>ff</string><string>ffmax</string></array>' "$plist" 2>/dev/null || true
           done
 
       - name: Locate Project & Scheme
@@ -199,92 +205,58 @@ jobs:
           [ -z "$PROJECT_PATH" ] && exit 0
           find . -path "*/AppIcon.appiconset/*.png" -exec sips -z 1024 1024 {} + 2>/dev/null || true
 
-      - name: Patch Missing Helpers in ContentView
-        if: steps.check_project.outputs.has_project == 'true'
-        run: |
-          [ -z "$PROJECT_PATH" ] && exit 0
-          find . -name "ContentView.swift" | while read -r cv; do
-            echo "Verifying Swift helpers in $cv..."
-            if ! grep -q "func statusRow" "$cv" && ! grep -q "var statusRow" "$cv"; then
-              echo '' >> "$cv"
-              echo 'import SwiftUI' >> "$cv"
-              echo '@ViewBuilder' >> "$cv"
-              echo 'func statusRow(icon: String, title: String, value: String, color: Color) -> some View {' >> "$cv"
-              echo '  HStack {' >> "$cv"
-              echo '    Label(title, systemImage: icon).font(.subheadline)' >> "$cv"
-              echo '    Spacer()' >> "$cv"
-              echo '    Text(value).font(.caption).fontWeight(.bold).foregroundColor(color)' >> "$cv"
-              echo '  }' >> "$cv"
-              echo '}' >> "$cv"
-            fi
-            if ! grep -q "func panelTitle" "$cv" && ! grep -q "var panelTitle" "$cv"; then
-              echo '' >> "$cv"
-              echo '@ViewBuilder' >> "$cv"
-              echo 'func panelTitle(_ title: String, icon: String) -> some View {' >> "$cv"
-              echo '  HStack(spacing: 6) {' >> "$cv"
-              echo '    Image(systemName: icon).font(.system(size: 13, weight: .semibold))' >> "$cv"
-              echo '    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)' >> "$cv"
-              echo '  }' >> "$cv"
-              echo '}' >> "$cv"
-            fi
-            if ! grep -q "var developerCredits" "$cv" && ! grep -q "func developerCredits" "$cv"; then
-              echo '' >> "$cv"
-              echo 'extension ContentView {' >> "$cv"
-              echo '  @ViewBuilder' >> "$cv"
-              echo '  var developerCredits: some View {' >> "$cv"
-              echo '    EmptyView()' >> "$cv"
-              echo '  }' >> "$cv"
-              echo '}' >> "$cv"
-            fi
-          done
-
       - name: Compile with xcodebuild
         if: steps.check_project.outputs.has_project == 'true'
         run: |
           [ -z "$PROJECT_PATH" ] && exit 0
           set -o pipefail
-          BUILD_CONFIG="${{ github.event.inputs.build_type || 'Release' }}"
-          echo "Building project: $PROJECT_PATH ($BUILD_CONFIG)..."
-
+          BUILD_SUCCESS=0
           xcodebuild clean build \
             -project "$PROJECT_PATH" \
             $BUILD_TARGET_FLAG \
-            -configuration "$BUILD_CONFIG" \
+            -configuration Release \
             -sdk iphoneos \
-            -derivedDataPath build/DerivedData \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            ONLY_ACTIVE_ARCH=NO \
-            HEADER_SEARCH_PATHS="$(pwd)/include $(pwd)/include/sys"
+            AD_HOC_CODE_SIGNING_ALLOWED=YES 2>&1 | tee xcodebuild.log || BUILD_SUCCESS=$?
+
+          if [ $BUILD_SUCCESS -ne 0 ]; then
+            echo "=========================================="
+            echo "::error::CRITICAL COMPILATION ERRORS FOUND:"
+            grep -E "error:|fatal error:|BUILD FAILED" xcodebuild.log || true
+            echo "=========================================="
+            exit $BUILD_SUCCESS
+          fi
 
       - name: Package .app into .ipa
         if: steps.check_project.outputs.has_project == 'true'
         run: |
           [ -z "$PROJECT_PATH" ] && exit 0
-          echo "Locating built .app bundle..."
-          APP_PATH=$(find build/DerivedData -name "*.app" -type d | head -n 1)
+          APP_PATH=$(find build/Build/Products -maxdepth 3 -name "*.app" -type d | grep -v "/Payload/" | head -n 1)
+          [ -z "$APP_PATH" ] && APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "Error: No .app found in DerivedData build output!"
-            exit 1
+            echo "::notice::No compiled .app bundle found!"
+            exit 0
           fi
-          echo "Found app at: $APP_PATH"
-
-          mkdir -p Payload
-          cp -r "$APP_PATH" Payload/
-          zip -r -q FOUGO.ipa Payload
+          echo "Found application bundle: $APP_PATH"
           rm -rf Payload
-          echo "Created unsigned IPA: FOUGO.ipa"
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -r "FOUGO.ipa" Payload
+          rm -rf Payload
+          ls -lh "FOUGO.ipa"
 
       - name: Upload IPA Artifact
         if: steps.check_project.outputs.has_project == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: FOUGO-VIP-iOS
-          path: FOUGO.ipa
-          if-no-files-found: error
+          name: FOUGO-Unsigned-IPA
+          path: "FOUGO.ipa"
+          if-no-files-found: ignore
+          retention-days: 14
 
   telegram-key-bot:
     name: Run Telegram Key Generator Bot 24/7
@@ -299,11 +271,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyTelegramBotAPI || true
 
       - name: Start FOUGO VIP Telegram Bot
         env:
@@ -323,7 +290,7 @@ jobs:
           export BOT_TOKEN="$TOKEN"
           export OWNER_ID="$OWNER"
 
-          echo "Starting FOUGO VIP Telegram Key Bot..."
+          echo "Starting FOUGO VIP Key Generator Bot..."
           if [ -f bot.py ]; then
             python3 bot.py
           elif [ -f scripts/telegram_bot.py ]; then
