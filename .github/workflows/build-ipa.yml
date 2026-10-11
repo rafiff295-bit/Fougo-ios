@@ -88,20 +88,195 @@ jobs:
             echo "Project file $f is validated."
           done
 
-      - name: Inject High-Security Login & Screenshot 2 FougoSwitch Buttons
+      - name: Replace Old Grid Buttons with Screenshot 2 FougoSwitch
         run: |
-          echo "Applying FOUGO VIP Security & Screenshot 2 UI Patches..."
-          if [ -f scripts/patch_security.py ]; then
-            python3 scripts/patch_security.py
-          elif [ -f patch_security.py ]; then
-            python3 patch_security.py
-          else
-            echo "::warning::scripts/patch_security.py not found in repo root. Checking subfolders..."
-            PATCH_SCRIPT=$(find . -name "patch_security.py" | head -n 1)
-            if [ -n "$PATCH_SCRIPT" ]; then
-              python3 "$PATCH_SCRIPT"
-            fi
-          fi
+          echo "Transforming old LazyVGrid cards into modern Screenshot 2 FougoSwitch..."
+          python3 -c '
+import os
+
+fougo_switch_def = """
+// MARK: - Modern 100% Responsive Toggle Switch (Matching Screenshot 2)
+struct FougoSwitch: View {
+    @Binding var isOn: Bool
+    var onToggle: (() -> Void)? = nil
+
+    var body: some View {
+        Button(action: {
+            if let onToggle = onToggle {
+                onToggle()
+            } else {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.72)) {
+                    isOn.toggle()
+                }
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            }
+        }) {
+            ZStack(alignment: isOn ? .trailing : .leading) {
+                Capsule()
+                    .fill(Color(white: 0.92))
+                    .frame(width: 72, height: 38)
+                    .shadow(color: Color.black.opacity(0.18), radius: 2, x: 0, y: 1)
+
+                ZStack {
+                    Circle()
+                        .fill(
+                            isOn
+                                ? LinearGradient(colors: [Color(red: 0.28, green: 0.82, blue: 0.32), Color(red: 0.18, green: 0.68, blue: 0.22)], startPoint: .top, endPoint: .bottom)
+                                : LinearGradient(colors: [Color(red: 0.92, green: 0.22, blue: 0.22), Color(red: 0.76, green: 0.12, blue: 0.12)], startPoint: .top, endPoint: .bottom)
+                        )
+                        .frame(width: 32, height: 32)
+                        .shadow(color: (isOn ? Color.green : Color.red).opacity(0.4), radius: 4, x: 0, y: 2)
+
+                    Text(isOn ? "ON" : "OFF")
+                        .font(.system(size: 11, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                }
+                .padding(3)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+"""
+
+screenshot2_options = """
+    // MARK: - Screenshot 2 Modern FougoSwitch Toggle Rows (100% Responsive)
+    private var patchOptions: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                panelTitle("PATCH OPTIONS", icon: "bolt.fill")
+                Spacer()
+                Text("SELECT TO ENABLE")
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.45))
+            }
+
+            VStack(spacing: 12) {
+                fougoPatchRow(name: "Aim Drag", icon: "scope", package: "FOUGO File (6).3105", state: $aimDragEnabled)
+                fougoPatchRow(name: "Aim Neck", icon: "target", package: "FOUGO File (7).3105", state: $aimNeckEnabled)
+                fougoPatchRow(name: "Antenna", icon: "antenna.radiowaves.left.and.right", package: "FOUGO File (8).3105", state: $hspeitoffEnabled)
+                fougoPatchRow(name: "144 FPS", icon: "speedometer", package: "FOUGO File (10).3105", state: $hyperBalamagicaEnabled)
+                fougoPatchRow(name: "Aim Body", icon: "figure.stand", package: "FOUGO File (12).3105", state: $aimBodyPackageEnabled)
+                fougoPatchRow(name: "Aim Chest", icon: "shield.fill", package: "FOUGO File (2).3105", state: $aimChestPackageEnabled)
+                fougoPatchRow(name: "Magic", icon: "wand.and.stars", package: "FOUGO File (14).3105", state: $magicEnabled)
+            }
+
+            HStack(spacing: 8) {
+                Circle().fill(patchMessage.localizedCaseInsensitiveContains("successful") || patchMessage.hasPrefix("INJECTED") ? .green : AppTheme.accent).frame(width: 7, height: 7)
+                Text(patchOperationBusy ? "PROCESSING PATCH…" : patchMessage)
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .lineLimit(2)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color.black.opacity(0.34), in: Capsule())
+        }
+    }
+
+    private func fougoPatchRow(name: String, icon: String, package: String, state: Binding<Bool>) -> some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(state.wrappedValue ? AppTheme.accent.opacity(0.25) : Color.white.opacity(0.06))
+                    .frame(width: 44, height: 44)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(state.wrappedValue ? AppTheme.accent.opacity(0.8) : Color.white.opacity(0.08), lineWidth: 1)
+                    )
+                Image(systemName: icon)
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(state.wrappedValue ? AppTheme.accent : Color.white.opacity(0.45))
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(name)
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                Text("FREE FIRE • NORMAL")
+                    .font(.system(size: 10, weight: .heavy, design: .monospaced))
+                    .foregroundColor(state.wrappedValue ? AppTheme.accent : Color.white.opacity(0.4))
+            }
+
+            Spacer()
+
+            FougoSwitch(isOn: state) {
+                togglePatchSafe(packageFilename: package, state: state, name: name)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(red: 0.08, green: 0.08, blue: 0.11))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(state.wrappedValue ? AppTheme.accent.opacity(0.6) : Color.white.opacity(0.06), lineWidth: 1)
+                )
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            togglePatchSafe(packageFilename: package, state: state, name: name)
+        }
+    }
+
+    private func togglePatchSafe(packageFilename: String, state: Binding<Bool>, name: String) {
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.72)) {
+            state.wrappedValue.toggle()
+        }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        let nextState = state.wrappedValue
+        patchMessage = nextState ? "INJECTED — " + name : "RESTORED — " + name
+        if let item = patchStore.items.first(where: { $0.packageURL.lastPathComponent.caseInsensitiveCompare(packageFilename) == .orderedSame }), let project = item.project {
+            DispatchQueue.global(qos: .userInitiated).async {
+                if nextState {
+                    _ = try? DevicePatchService.apply(project: project)
+                } else if let receipt = DevicePatchService.latestReceipt(projectID: item.id) {
+                    try? DevicePatchService.restore(receipt: receipt)
+                }
+            }
+        }
+    }
+"""
+
+for root, dirs, files in os.walk("."):
+    for f in files:
+        fpath = os.path.join(root, f)
+        if f == "ContentView.swift":
+            with open(fpath, "r", encoding="utf-8") as rf:
+                content = rf.read()
+            if "LazyVGrid" in content and "patchOptions" in content:
+                p_start = content.find("private var patchOptions: some View {")
+                p_end = content.find("private var gameLaunchPanel: some View {")
+                if p_start != -1 and p_end != -1:
+                    content = content[:p_start] + screenshot2_options + "\n    " + content[p_end:]
+                if "struct FougoSwitch: View" not in content:
+                    content += "\n" + fougo_switch_def
+                content = content.replace("developerCredits", "// developerCredits removed")
+                with open(fpath, "w", encoding="utf-8") as wf:
+                    wf.write(content)
+                print(f"Patched {fpath} with Screenshot 2 FougoSwitch!")
+        elif f == "PatchProjectLibrary.swift":
+            with open(fpath, "r", encoding="utf-8") as rf:
+                content = rf.read()
+            if "urls(forResourcesWithExtension: \"FOUGO\"" in content:
+                content = content.replace(
+                    "bundle.urls(forResourcesWithExtension: \"FOUGO\", subdirectory: \"Patches\") ?? []",
+                    "(bundle.urls(forResourcesWithExtension: \"3105\", subdirectory: \"Patches\") ?? []) + (bundle.urls(forResourcesWithExtension: \"FOUGO\", subdirectory: \"Patches\") ?? [])"
+                )
+                content = content.replace(
+                    "bundle.urls(forResourcesWithExtension: \"FOUGO\", subdirectory: nil) ?? []",
+                    "(bundle.urls(forResourcesWithExtension: \"3105\", subdirectory: nil) ?? []) + (bundle.urls(forResourcesWithExtension: \"FOUGO\", subdirectory: nil) ?? [])"
+                )
+                content = content.replace(
+                    "where url.pathExtension.lowercased() == \"FOUGO\"",
+                    "where url.pathExtension.lowercased() == \"fougo\" || url.pathExtension == \"3105\""
+                )
+                with open(fpath, "w", encoding="utf-8") as wf:
+                    wf.write(content)
+                print(f"Fixed patch resource loading in {fpath}!")
+'
 
       - name: Register Free Fire URL Schemes in Info.plist
         run: |
