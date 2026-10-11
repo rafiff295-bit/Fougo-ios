@@ -434,10 +434,37 @@ for root, dirs, files in os.walk('.'):
             content = re.sub(r'@State\s+(?:private\s+)?var\s+isPackageFound\s*(?::\s*Bool)?\s*=\s*false', '@State var isPackageFound = true', content)
             content = re.sub(r'@State\s+(?:private\s+)?var\s+packageFound\s*(?::\s*Bool)?\s*=\s*false', '@State var packageFound = true', content)
             content = re.sub(r'guard\s+isPackageFound\s+else\s*\{[^}]*\}', '// Bypassed guard isPackageFound', content)
-            content = re.sub(r'guard\s+packageFound\s+else\s*\{[^}]*\}', '// Bypassed guard packageFound', content)
+            # 3. Inject missing statusRow and panelTitle helpers if missing
+            helpers = ""
+            if "func statusRow" not in content and "var statusRow" not in content:
+                helpers += '''
+import SwiftUI
+
+@ViewBuilder
+func statusRow(icon: String, title: String, value: String, color: Color) -> some View {
+    HStack {
+        Label(title, systemImage: icon).font(.subheadline)
+        Spacer()
+        Text(value).font(.caption).fontWeight(.bold).foregroundColor(color)
+    }
+}
+'''
+            if "func panelTitle" not in content and "var panelTitle" not in content:
+                helpers += '''
+@ViewBuilder
+func panelTitle(_ title: String, icon: String) -> some View {
+    HStack(spacing: 6) {
+        Image(systemName: icon).font(.system(size: 13, weight: .semibold))
+        Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)
+    }
+}
+'''
+            if helpers:
+                content += "\n" + helpers
+
             with open(fpath, 'w', encoding='utf-8') as wf:
                 wf.write(content)
-            print(f"Patched {fpath} (removed developerCredits and bypassed package check)")
+            print(f"Patched {fpath} (removed developerCredits, bypassed package check, injected helpers)")
             patched_count += 1
         elif f == 'DisplayIdentityAttribution.swift':
             with open(fpath, 'w', encoding='utf-8') as out:
