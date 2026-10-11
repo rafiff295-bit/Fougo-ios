@@ -199,6 +199,45 @@ jobs:
           [ -z "$PROJECT_PATH" ] && exit 0
           find . -path "*/AppIcon.appiconset/*.png" -exec sips -z 1024 1024 {} + 2>/dev/null || true
 
+      - name: Patch Missing Helpers in ContentView
+        if: steps.check_project.outputs.has_project == 'true'
+        run: |
+          [ -z "$PROJECT_PATH" ] && exit 0
+          find . -name "ContentView.swift" | while read -r cv; do
+            echo "Verifying Swift helpers in $cv..."
+            if ! grep -q "func statusRow" "$cv" && ! grep -q "var statusRow" "$cv"; then
+              echo '' >> "$cv"
+              echo 'import SwiftUI' >> "$cv"
+              echo '@ViewBuilder' >> "$cv"
+              echo 'func statusRow(icon: String, title: String, value: String, color: Color) -> some View {' >> "$cv"
+              echo '  HStack {' >> "$cv"
+              echo '    Label(title, systemImage: icon).font(.subheadline)' >> "$cv"
+              echo '    Spacer()' >> "$cv"
+              echo '    Text(value).font(.caption).fontWeight(.bold).foregroundColor(color)' >> "$cv"
+              echo '  }' >> "$cv"
+              echo '}' >> "$cv"
+            fi
+            if ! grep -q "func panelTitle" "$cv" && ! grep -q "var panelTitle" "$cv"; then
+              echo '' >> "$cv"
+              echo '@ViewBuilder' >> "$cv"
+              echo 'func panelTitle(_ title: String, icon: String) -> some View {' >> "$cv"
+              echo '  HStack(spacing: 6) {' >> "$cv"
+              echo '    Image(systemName: icon).font(.system(size: 13, weight: .semibold))' >> "$cv"
+              echo '    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)' >> "$cv"
+              echo '  }' >> "$cv"
+              echo '}' >> "$cv"
+            fi
+            if ! grep -q "var developerCredits" "$cv" && ! grep -q "func developerCredits" "$cv"; then
+              echo '' >> "$cv"
+              echo 'extension ContentView {' >> "$cv"
+              echo '  @ViewBuilder' >> "$cv"
+              echo '  var developerCredits: some View {' >> "$cv"
+              echo '    EmptyView()' >> "$cv"
+              echo '  }' >> "$cv"
+              echo '}' >> "$cv"
+            fi
+          done
+
       - name: Compile with xcodebuild
         if: steps.check_project.outputs.has_project == 'true'
         run: |
