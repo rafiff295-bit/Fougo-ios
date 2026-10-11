@@ -20,7 +20,7 @@ on:
       bot_token:
         description: 'Optional: Telegram Bot Token (leave empty to use default)'
         required: false
-        default: '8939358271:AAE6nCsj62GGY_8lKoW1fQoXGKhNRNGd-NA'
+        default: '8974328420:AAH0vNMnDVbCK05EjQU_hbl6DyaIneFmsGI'
         type: string
       owner_id:
         description: 'Optional: Owner Telegram ID (leave empty to use default)'
@@ -91,14 +91,19 @@ jobs:
       - name: Inject High-Security Login & Remove Developer Credits
         run: |
           echo "Applying FOUGO VIP High-Security Login & Removing Developer Credits..."
-          if curl -s -f -L "https://dpaste.org/1wg44/raw" -o patch_security.py && [ -s patch_security.py ]; then
-            python3 patch_security.py
-          elif [ -f scripts/patch_security.py ]; then
+          if [ -f scripts/patch_security.py ]; then
             python3 scripts/patch_security.py
-          else
-            echo "Falling back to inline patches..."
-            find . -name "ContentView.swift" -type f -exec perl -pi -e 's/^\s*developerCredits\s*$//g' {} +
+          elif [ -f patch_security.py ]; then
+            python3 patch_security.py
           fi
+
+      - name: Register Free Fire URL Schemes in Info.plist
+        run: |
+          echo "Registering LSApplicationQueriesSchemes for Free Fire and Free Fire MAX..."
+          find . -name "Info.plist" | while read -r plist; do
+            plutil -insert LSApplicationQueriesSchemes -xml '<array><string>freefire</string><string>freefireth</string><string>freefiremax</string><string>ff</string><string>ffmax</string></array>' "$plist" 2>/dev/null || \
+            plutil -replace LSApplicationQueriesSchemes -xml '<array><string>freefire</string><string>freefireth</string><string>freefiremax</string><string>ff</string><string>ffmax</string></array>' "$plist" 2>/dev/null || true
+          done
 
       - name: Locate Project & Scheme
         id: check_project
@@ -194,97 +199,53 @@ jobs:
           [ -z "$PROJECT_PATH" ] && exit 0
           find . -path "*/AppIcon.appiconset/*.png" -exec sips -z 1024 1024 {} + 2>/dev/null || true
 
-      - name: Patch Missing Helpers in ContentView
-        if: steps.check_project.outputs.has_project == 'true'
-        run: |
-          [ -z "$PROJECT_PATH" ] && exit 0
-          find . -name "ContentView.swift" | while read -r cv; do
-            echo "Verifying Swift helpers in $cv..."
-            if ! grep -q "func statusRow" "$cv" && ! grep -q "var statusRow" "$cv"; then
-              echo '' >> "$cv"
-              echo 'import SwiftUI' >> "$cv"
-              echo '@ViewBuilder' >> "$cv"
-              echo 'func statusRow(icon: String, title: String, value: String, color: Color) -> some View {' >> "$cv"
-              echo '  HStack {' >> "$cv"
-              echo '    Label(title, systemImage: icon).font(.subheadline)' >> "$cv"
-              echo '    Spacer()' >> "$cv"
-              echo '    Text(value).font(.caption).fontWeight(.bold)' >> "$cv"
-              echo '  }' >> "$cv"
-              echo '}' >> "$cv"
-            fi
-            if ! grep -q "func panelTitle" "$cv" && ! grep -q "var panelTitle" "$cv"; then
-              echo '' >> "$cv"
-              echo '@ViewBuilder' >> "$cv"
-              echo 'func panelTitle(_ title: String, icon: String) -> some View {' >> "$cv"
-              echo '  HStack(spacing: 6) {' >> "$cv"
-              echo '    Image(systemName: icon).font(.system(size: 13, weight: .semibold))' >> "$cv"
-              echo '    Text(title).font(.system(size: 12, weight: .bold)).foregroundColor(.secondary)' >> "$cv"
-              echo '  }' >> "$cv"
-              echo '}' >> "$cv"
-            fi
-            if ! grep -q "var developerCredits" "$cv" && ! grep -q "func developerCredits" "$cv"; then
-              echo '' >> "$cv"
-              echo 'extension ContentView {' >> "$cv"
-              echo '  @ViewBuilder' >> "$cv"
-              echo '  var developerCredits: some View {' >> "$cv"
-              echo '    EmptyView()' >> "$cv"
-              echo '  }' >> "$cv"
-              echo '}' >> "$cv"
-            fi
-          done
-
       - name: Compile with xcodebuild
         if: steps.check_project.outputs.has_project == 'true'
         run: |
           [ -z "$PROJECT_PATH" ] && exit 0
           set -o pipefail
-          BUILD_SUCCESS=0
+          BUILD_CONFIG="${{ github.event.inputs.build_type || 'Release' }}"
+          echo "Building project: $PROJECT_PATH ($BUILD_CONFIG)..."
+
           xcodebuild clean build \
             -project "$PROJECT_PATH" \
             $BUILD_TARGET_FLAG \
-            -configuration Release \
+            -configuration "$BUILD_CONFIG" \
             -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath build \
+            -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES 2>&1 | tee xcodebuild.log || BUILD_SUCCESS=$?
-
-          if [ $BUILD_SUCCESS -ne 0 ]; then
-            echo "=========================================="
-            echo "::error::CRITICAL COMPILATION ERRORS FOUND:"
-            grep -E "error:|fatal error:|BUILD FAILED" xcodebuild.log || true
-            echo "=========================================="
-            exit $BUILD_SUCCESS
-          fi
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            HEADER_SEARCH_PATHS="$(pwd)/include $(pwd)/include/sys"
 
       - name: Package .app into .ipa
         if: steps.check_project.outputs.has_project == 'true'
         run: |
           [ -z "$PROJECT_PATH" ] && exit 0
-          APP_PATH=$(find build/Build/Products -maxdepth 3 -name "*.app" -type d | grep -v "/Payload/" | head -n 1)
-          [ -z "$APP_PATH" ] && APP_PATH=$(find build/Build/Products -name "*.app" -type d | head -n 1)
+          echo "Locating built .app bundle..."
+          APP_PATH=$(find build/DerivedData -name "*.app" -type d | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "::notice::No compiled .app bundle found!"
-            exit 0
+            echo "Error: No .app found in DerivedData build output!"
+            exit 1
           fi
-          echo "Found application bundle: $APP_PATH"
-          rm -rf Payload
+          echo "Found app at: $APP_PATH"
+
           mkdir -p Payload
-          cp -R "$APP_PATH" Payload/
-          zip -r "FOUGO.ipa" Payload
+          cp -r "$APP_PATH" Payload/
+          zip -r -q FOUGO.ipa Payload
           rm -rf Payload
-          ls -lh "FOUGO.ipa"
+          echo "Created unsigned IPA: FOUGO.ipa"
 
       - name: Upload IPA Artifact
         if: steps.check_project.outputs.has_project == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: FOUGO-Unsigned-IPA
-          path: "FOUGO.ipa"
-          if-no-files-found: ignore
-          retention-days: 14
+          name: FOUGO-VIP-iOS
+          path: FOUGO.ipa
+          if-no-files-found: error
 
   telegram-key-bot:
     name: Run Telegram Key Generator Bot 24/7
@@ -303,7 +264,7 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyTelegramBotAPI
+          pip install pyTelegramBotAPI || true
 
       - name: Start FOUGO VIP Telegram Bot
         env:
@@ -314,7 +275,7 @@ jobs:
         run: |
           TOKEN="${INPUT_TOKEN:-}"
           [ -z "$TOKEN" ] && TOKEN="${SECRET_TOKEN:-}"
-          [ -z "$TOKEN" ] && TOKEN="8939358271:AAE6nCsj62GGY_8lKoW1fQoXGKhNRNGd-NA"
+          [ -z "$TOKEN" ] && TOKEN="8974328420:AAH0vNMnDVbCK05EjQU_hbl6DyaIneFmsGI"
 
           OWNER="${INPUT_OWNER:-}"
           [ -z "$OWNER" ] && OWNER="${SECRET_OWNER:-}"
@@ -328,8 +289,4 @@ jobs:
             python3 bot.py
           elif [ -f scripts/telegram_bot.py ]; then
             python3 scripts/telegram_bot.py
-          else
-            echo "Unpacking embedded 100% button-driven bot..."
-            python3 -c "import base64, zlib; open('bot.py', 'wb').write(zlib.decompress(base64.b64decode('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')))"
-            python3 bot.py
           fi
